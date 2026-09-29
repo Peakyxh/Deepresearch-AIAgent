@@ -1,0 +1,29 @@
+# Local secrets
+.env
+.env.*
+!.env.example
+
+# Python caches and virtual environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+.pip_packages/
+
+# Runtime data and generated reports
+chroma_data/
+outputs/
+evaluation/eval_results/
+tests/output_*.json
+tests/output_*.txt
+tests/output_compress/
+tests/debug_prompts/
+
+# Editor and OS metadata
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
