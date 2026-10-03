@@ -6,7 +6,7 @@ Agent 基类 —— 所有 Agent 的公共父类
 """
 
 import logging
-from typing import Any, TYPE_CHECKING
+from typing import Any, Callable, TYPE_CHECKING
 
 from llm.base_llm import BaseLLM
 from llm.llm_factory import LLMFactory
@@ -33,6 +33,7 @@ class BaseAgent:
         name: str,
         llm: BaseLLM | None = None,
         context_manager: "ContextManager | None" = None,
+        event_callback: Callable[[dict[str, Any]], None] | None = None,
     ):
         """
         初始化 Agent 基类
@@ -48,8 +49,46 @@ class BaseAgent:
         self.llm = llm or LLMFactory.create()
         # 上下文管理器（可选）
         self.context_manager = context_manager
+        # Web/API 运行时用于发布结构化进度事件；CLI 模式保持为 None。
+        self.event_callback = event_callback
+        self.token_usage = {"calls": 0, "input_tokens": 0, "output_tokens": 0}
         # 每个 Agent 拥有独立的 logger
         self.logger = logging.getLogger(f"Agent.{name}")
+
+    async def generate(
+        self,
+        prompt: str,
+        system_prompt: str = "",
+        max_tokens: int | None = None,
+    ) -> str:
+        """Call the LLM and publish a lightweight token estimate."""
+        input_tokens = self._estimate_tokens(f"{system_prompt}\n{prompt}")
+        response = await self.llm.generate(
+            prompt=prompt,
+            system_prompt=system_prompt,
+            max_tokens=max_tokens,
+        )
+        output_tokens = self._estimate_tokens(response)
+        self.token_usage["calls"] += 1
+        self.token_usage["input_tokens"] += input_tokens
+        self.token_usage["output_tokens"] += output_tokens
+        if self.event_callback:
+            try:
+                self.event_callback(
+                    {
+                        "type": "token_usage",
+                        "agent": self.name,
+                        "input_tokens": input_tokens,
+                        "output_tokens": output_tokens,
+                    }
+                )
+            except Exception:
+                self.logger.debug("Token usage callback failed", exc_info=True)
+        return response
+
+    @staticmethod
+    def _estimate_tokens(text: str) -> int:
+        return max(1, len(text or "") // 3)
 
     async def run(self, state: dict[str, Any]) -> dict[str, Any]:
         """
@@ -137,6 +176,15 @@ class BaseAgent:
         formatted = f"[{self.name}] {message}"
         self.logger.info(formatted)
         print(formatted)
+        if self.event_callback:
+            try:
+                self.event_callback({
+                    "type": "agent_log",
+                    "agent": self.name,
+                    "message": message,
+                })
+            except Exception as exc:  # 进度上报不应中断核心研究流程
+                self.logger.debug("事件回调失败: %s", exc)
 
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}(name={self.name}, llm={self.llm})"

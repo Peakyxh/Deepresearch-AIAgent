@@ -115,7 +115,13 @@ class Settings(BaseSettings):
     search_content_min_length: int = 50
 
     # 网页搜索结果内容最大长度（字符数），超过此值的内容截断
-    search_content_max_length: int = 5000
+    search_content_max_length: int = 2000
+
+    # 每个子问题进入 LLM 上下文的全局证据预算（不是每个关键词的预算）
+    max_web_sources_per_sub_question: int = 8
+    max_paper_sources_per_sub_question: int = 4
+    max_sources_per_domain: int = 2
+    evidence_excerpt_chars: int = 600
 
     # 论文年份过滤：只保留此年份之后的论文（0 表示不过滤）
     paper_min_year: int = 0
@@ -135,8 +141,14 @@ class Settings(BaseSettings):
     # 逐子问题评审通过阈值（单个子问题总分 ≥ 此值则通过，满分100）
     sub_question_critique_pass_threshold: int = 60
 
-    # 整体一致性评审通过阈值（满分100）
-    overall_coherence_pass_threshold: int = 60
+    # 整体一致性直接通过阈值（满分100）。达到该分数后，非阻断问题交给 Writer 修正。
+    overall_coherence_pass_threshold: int = 80
+
+    # 整体一致性有条件通过阈值。处于该区间时，仅阻断性问题触发补充研究。
+    overall_coherence_conditional_threshold: int = 70
+
+    # Critic 最多触发几轮补充研究，达到上限后携带剩余意见进入 Writer。
+    critique_max_retries: int = 1
 
     # ==================== Orchestrator 调度配置 ====================
 
@@ -150,13 +162,13 @@ class Settings(BaseSettings):
     orchestrator_dynamic_adjust: bool = True
 
     # 动态调整最大追加次数（防止无限追加子问题，每次追加可包含多个子问题）
-    orchestrator_dynamic_adjust_max_rounds: int = 3
+    orchestrator_dynamic_adjust_max_rounds: int = 1
 
     # 每次动态调整最多追加的子问题数量
-    orchestrator_dynamic_adjust_max_new_per_round: int = 2
+    orchestrator_dynamic_adjust_max_new_per_round: int = 1
 
     # 动态调整总共最多追加的子问题数量
-    orchestrator_dynamic_adjust_max_total_appends: int = 2
+    orchestrator_dynamic_adjust_max_total_appends: int = 1
 
     # 子问题重叠判定阈值（关键词/文本 Jaccard 相似度 ≥ 此值判定为重叠，0-1，0 表示禁用去重）
     sub_question_overlap_threshold: float = 0.6
@@ -206,7 +218,16 @@ class Settings(BaseSettings):
     writer_interactive: bool = True
 
     # Writer 最大输出 token 数
-    writer_max_tokens: int = 32768
+    writer_max_tokens: int = 12000
+    writer_outline_max_tokens: int = 2000
+
+    # 各阶段独立输出预算，避免所有 Agent 共用过大的通用上限
+    clarifier_max_tokens: int = 1200
+    planner_max_tokens: int = 3000
+    researcher_max_tokens: int = 5000
+    critic_max_tokens: int = 2500
+    critic_findings_chars_per_sub_question: int = 2500
+    orchestrator_max_tokens: int = 1500
 
     # ==================== 通用配置 ====================
 
@@ -220,7 +241,7 @@ class Settings(BaseSettings):
     llm_temperature: float = 0.3
 
     # LLM 最大输出 token 数（Writer Agent 会单独使用更大的值）
-    llm_max_tokens: int = 16384
+    llm_max_tokens: int = 8192
 
     # 报告输出目录
     output_dir: str = "./outputs"

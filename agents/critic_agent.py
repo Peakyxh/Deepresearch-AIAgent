@@ -16,7 +16,12 @@ from agents.base_agent import BaseAgent
 from llm.base_llm import BaseLLM
 from memory.context_manager import ContextManager
 from config import settings
-from workflows.state import SubQuestionResult
+from workflows.state import SubQuestion, SubQuestionResult
+from workflows.evidence import (
+    deduplicate_cards,
+    format_evidence_catalog,
+    summarize_evidence_coverage,
+)
 from prompts.critic_prompt import (
     CRITIC_SYSTEM_PROMPT,
     CRITIC_USER_PROMPT,
@@ -52,7 +57,6 @@ class CriticAgent(BaseAgent):
         Returns:
             更新后的状态字典
         """
-        query = state.get("query", "")
         findings = state.get("findings", "")
         sub_question_results = state.get("sub_question_results", [])
 
@@ -124,6 +128,16 @@ class CriticAgent(BaseAgent):
             if not critique.get("passed", False):
                 failed_ids.append(sq_id)
 
+        # 计划覆盖是确定性约束，不交给 LLM 猜测。只有实际进入执行计划、
+        # 却没有产出结果的子问题才视为阻断性缺失。
+        missing_planned_ids = self._find_missing_planned_ids(
+            state, sub_question_results
+        )
+        for sq_id in missing_planned_ids:
+            if sq_id not in failed_ids:
+                failed_ids.append(sq_id)
+                self.log(f"  计划覆盖缺失 [{sq_id}]，加入补充研究列表")
+
         if failed_ids:
             self.log(f"不合格子问题: {failed_ids}")
         else:
@@ -134,19 +148,83 @@ class CriticAgent(BaseAgent):
             query, sub_question_results, search_results, paper_results
         )
 
-        overall_passed = overall_critique.get("passed", False)
         overall_score = overall_critique.get("total_score", 0)
-        self.log(f"整体一致性: {'✅ 通过' if overall_passed else '❌ 不合格'}（总分 {overall_score}/100）")
+        direct_threshold = settings.overall_coherence_pass_threshold
+        conditional_threshold = settings.overall_coherence_conditional_threshold
+
+        known_ids = {
+            self._get_sq_id(item) for item in sub_question_results
+            if self._get_sq_id(item)
+        }
+        known_ids.update(
+            sq.id if isinstance(sq, SubQuestion) else sq.get("id", "")
+            for sq in state.get("structured_sub_questions", [])
+        )
+        problematic_ids = self._valid_target_ids(
+            overall_critique.get("problematic_sub_question_ids", []), known_ids
+        )
+        blocking_ids = self._valid_target_ids(
+            overall_critique.get("blocking_sub_question_ids", []), known_ids
+        )
+
+        is_direct_pass = overall_score >= direct_threshold
+        is_conditional_band = overall_score >= conditional_threshold
+        added_topic_ids: list[str] = []
+        if not is_direct_pass:
+            added_topic_ids = self._append_missing_research_topics(
+                state, overall_critique.get("missing_research_topics", [])
+            )
+
+        if is_direct_pass:
+            # 高分时，整体评审列出的普通问题只进入 Writer 修订清单。
+            overall_accepted = True
+            critique_outcome = "passed"
+            overall_status = "✅ 直接通过"
+        elif is_conditional_band:
+            # 中间分只允许明确标记为 blocking 的问题触发补研。
+            for sq_id in [*blocking_ids, *added_topic_ids]:
+                if sq_id not in failed_ids:
+                    failed_ids.append(sq_id)
+            overall_accepted = not blocking_ids and not added_topic_ids
+            critique_outcome = (
+                "conditional_pass" if overall_accepted else "research_retry"
+            )
+            overall_status = (
+                "⚠️ 有条件通过" if overall_accepted else "❌ 存在阻断问题"
+            )
+        else:
+            # 低分时优先使用阻断目标；兼容旧模型输出时回退到 problematic IDs。
+            retry_targets = blocking_ids or problematic_ids
+            for sq_id in [*retry_targets, *added_topic_ids]:
+                if sq_id not in failed_ids:
+                    failed_ids.append(sq_id)
+            if retry_targets or added_topic_ids:
+                overall_accepted = False
+                critique_outcome = "research_retry"
+                overall_status = "❌ 需要补充研究"
+            else:
+                # 没有可执行目标时禁止退回并重跑整个研究，交给 Writer 明示局限。
+                overall_accepted = True
+                critique_outcome = "conditional_pass"
+                overall_status = "⚠️ 有条件通过（无可执行补研目标）"
+
+        self.log(
+            f"整体一致性: {overall_status}（总分 {overall_score}/100；"
+            f"直接通过阈值 {direct_threshold}，有条件通过阈值 {conditional_threshold}）"
+        )
         self._log_overall_score_details(overall_critique)
 
-        problematic_ids = overall_critique.get("problematic_sub_question_ids", [])
-        for sq_id in problematic_ids:
-            if sq_id not in failed_ids:
-                failed_ids.append(sq_id)
-                self.log(f"  整体一致性问题涉及子问题 [{sq_id}]，加入重试列表")
+        if problematic_ids:
+            self.log(
+                f"  诊断涉及子问题 {problematic_ids}；"
+                "非阻断问题仅交给 Writer，不自动补研"
+            )
+        for sq_id in blocking_ids:
+            if not is_direct_pass:
+                self.log(f"  阻断性问题涉及子问题 [{sq_id}]，加入补充研究列表")
 
         all_sq_passed = len(failed_ids) == 0
-        critique_passed = all_sq_passed and overall_passed
+        critique_passed = all_sq_passed and overall_accepted
 
         avg_sq_score = 0
         if per_critiques:
@@ -172,12 +250,26 @@ class CriticAgent(BaseAgent):
                 all_suggestions.append(f"[{sq_id}] {s}")
         overall_suggestions = overall_critique.get("revision_suggestions", [])
         all_suggestions.extend(overall_suggestions)
+        writer_suggestions = list(
+            overall_critique.get("writer_revision_suggestions", [])
+        )
+        for suggestion in overall_suggestions:
+            if suggestion not in writer_suggestions:
+                writer_suggestions.append(suggestion)
+        if writer_suggestions:
+            feedback_parts.append(
+                "写作阶段修订建议:\n"
+                + "\n".join(f"- {item}" for item in writer_suggestions)
+            )
+            combined_feedback = "\n".join(feedback_parts)
 
         state["per_sub_question_critiques"] = per_critiques
         state["failed_sub_question_ids"] = failed_ids
         state["overall_coherence_score"] = overall_score
         state["overall_coherence_feedback"] = overall_critique.get("feedback", "")
-        state["overall_coherence_passed"] = overall_passed
+        state["overall_coherence_passed"] = overall_accepted
+        state["critique_outcome"] = critique_outcome
+        state["writer_revision_suggestions"] = writer_suggestions
 
         state["critique_scores"] = overall_critique.get("scores", {})
         state["critique_score_details"] = overall_critique.get("score_details", {})
@@ -192,9 +284,9 @@ class CriticAgent(BaseAgent):
             state["critique_passed"] = False
             fail_reasons = []
             if not all_sq_passed:
-                fail_reasons.append(f"{len(failed_ids)} 个子问题不合格")
-            if not overall_passed:
-                fail_reasons.append("整体一致性不合格")
+                fail_reasons.append(f"{len(failed_ids)} 个阻断性问题")
+            if not overall_accepted:
+                fail_reasons.append("需要补充研究")
             self.log(f"审查结果: ❌ 未通过（{'，'.join(fail_reasons)}）")
 
         if state["critique_passed"]:
@@ -212,9 +304,83 @@ class CriticAgent(BaseAgent):
                         self.log(f"  {i}. {s}")
             else:
                 state["current_step"] = "writer"
+                state["critique_outcome"] = "forced_writer"
                 self.log(f"已达到最大重试次数 ({max_retries})，强制进入 Writer 阶段")
 
         return state
+
+    def _find_missing_planned_ids(
+        self,
+        state: dict[str, Any],
+        sub_question_results: list,
+    ) -> list[str]:
+        """Find required execution-plan items that produced no result."""
+        planned_ids: list[str] = []
+        for layer in state.get("orchestrator_plan", {}).get("layers", []):
+            planned_ids.extend(layer.get("sub_question_ids", []))
+        result_ids = {
+            self._get_sq_id(result) for result in sub_question_results
+            if self._get_sq_id(result)
+        }
+        return [sq_id for sq_id in planned_ids if sq_id not in result_ids]
+
+    @staticmethod
+    def _valid_target_ids(candidate_ids: list, known_ids: set[str]) -> list[str]:
+        """Keep stable, known IDs and remove hallucinated/duplicate targets."""
+        result: list[str] = []
+        for candidate in candidate_ids:
+            sq_id = str(candidate).strip()
+            if sq_id and sq_id in known_ids and sq_id not in result:
+                result.append(sq_id)
+        return result
+
+    def _append_missing_research_topics(
+        self,
+        state: dict[str, Any],
+        topics: list,
+    ) -> list[str]:
+        """Turn blocking coverage gaps into explicit targeted sub-questions."""
+        structured = state.setdefault("structured_sub_questions", [])
+        existing_ids = {
+            sq.id if isinstance(sq, SubQuestion) else sq.get("id", "")
+            for sq in structured
+        }
+        existing_questions = {
+            (sq.question if isinstance(sq, SubQuestion) else sq.get("question", ""))
+            .strip()
+            .lower()
+            for sq in structured
+        }
+        state_topics = state.setdefault("missing_research_topics", [])
+        added_ids: list[str] = []
+
+        for topic in topics:
+            if not isinstance(topic, dict):
+                continue
+            question = str(topic.get("question", "")).strip()
+            if not question or question.lower() in existing_questions:
+                continue
+            index = 1
+            while f"sq_gap_{index}" in existing_ids:
+                index += 1
+            sq_id = f"sq_gap_{index}"
+            structured.append(
+                SubQuestion(
+                    id=sq_id,
+                    question=question,
+                    priority=0,
+                    keywords_zh=topic.get("keywords_zh", []),
+                    keywords_en=topic.get("keywords_en", []),
+                )
+            )
+            normalized_topic = {**topic, "id": sq_id}
+            state_topics.append(normalized_topic)
+            existing_ids.add(sq_id)
+            existing_questions.add(question.lower())
+            added_ids.append(sq_id)
+            self.log(f"  新增阻断性缺失主题 [{sq_id}]: {question}")
+
+        return added_ids
 
     async def _run_overall_critique(self, state: dict[str, Any]) -> dict[str, Any]:
         """
@@ -224,11 +390,15 @@ class CriticAgent(BaseAgent):
         findings = state.get("findings", "")
         search_results = state.get("search_results", [])
         paper_results = state.get("paper_results", [])
+        evidence_cards = state.get("evidence_cards", [])
 
         self.log("开始多维度量化评分审查...")
 
-        search_text = self._format_search_results_for_verification(search_results)
-        paper_text = self._format_paper_results_for_verification(paper_results)
+        if evidence_cards:
+            search_text, paper_text = format_evidence_catalog(evidence_cards)
+        else:
+            search_text = self._format_search_results_for_verification(search_results)
+            paper_text = self._format_paper_results_for_verification(paper_results)
 
         if self.context_manager:
             combined_text = search_text + "\n\n" + paper_text
@@ -261,9 +431,10 @@ class CriticAgent(BaseAgent):
         )
 
         self.log("正在调用 LLM 进行多维度评分审查...")
-        response = await self.llm.generate(
+        response = await self.generate(
             prompt=user_prompt,
             system_prompt=CRITIC_SYSTEM_PROMPT,
+            max_tokens=settings.critic_max_tokens,
         )
 
         critique_data = self._parse_json_response(response)
@@ -349,14 +520,17 @@ class CriticAgent(BaseAgent):
         Returns:
             评审结果字典
         """
-        sq_id = self._get_sq_id(sq_result)
         sq_question = self._get_sq_field(sq_result, "sub_question", "")
         sq_findings = self._get_sq_field(sq_result, "findings", "")
         sq_search_results = self._get_sq_field(sq_result, "search_results", [])
         sq_paper_results = self._get_sq_field(sq_result, "paper_results", [])
 
-        search_text = self._format_search_results_for_verification(sq_search_results)
-        paper_text = self._format_paper_results_for_verification(sq_paper_results)
+        evidence_cards = self._get_sq_field(sq_result, "evidence_cards", [])
+        if evidence_cards:
+            search_text, paper_text = format_evidence_catalog(evidence_cards)
+        else:
+            search_text = self._format_search_results_for_verification(sq_search_results)
+            paper_text = self._format_paper_results_for_verification(sq_paper_results)
 
         if self.context_manager:
             combined_text = search_text + "\n\n" + paper_text
@@ -381,9 +555,10 @@ class CriticAgent(BaseAgent):
             paper_results=paper_text,
         )
 
-        response = await self.llm.generate(
+        response = await self.generate(
             prompt=user_prompt,
             system_prompt=SUB_QUESTION_CRITIC_SYSTEM_PROMPT,
+            max_tokens=settings.critic_max_tokens,
         )
 
         critique_data = self._parse_json_response(response)
@@ -437,38 +612,43 @@ class CriticAgent(BaseAgent):
             sq_id = self._get_sq_id(sq_result)
             sq_question = self._get_sq_field(sq_result, "sub_question", "")
             sq_findings = self._get_sq_field(sq_result, "findings", "")
-            all_findings_parts.append(f"## 子问题 [{sq_id}]: {sq_question}\n\n{sq_findings}")
+            key_insights = self._get_sq_field(sq_result, "key_insights", [])
+            insight_text = "\n".join(f"- {item}" for item in key_insights)
+            finding_excerpt = sq_findings[
+                : settings.critic_findings_chars_per_sub_question
+            ]
+            if len(sq_findings) > len(finding_excerpt):
+                finding_excerpt += "\n（其余细节已在逐子问题评审中核验）"
+            all_findings_parts.append(
+                f"## 子问题 [{sq_id}]: {sq_question}\n\n"
+                f"关键洞察:\n{insight_text or '无结构化洞察'}\n\n"
+                f"研究发现摘要:\n{finding_excerpt}"
+            )
 
         all_findings = "\n\n---\n\n".join(all_findings_parts)
 
-        search_text = self._format_search_results_for_verification(search_results)
-        paper_text = self._format_paper_results_for_verification(paper_results)
-
-        if self.context_manager:
-            combined_text = search_text + "\n\n" + paper_text
-            combined_tokens = self.context_manager.estimate_text_tokens(combined_text)
-
-            if combined_tokens > self.context_manager.max_tokens:
-                search_tokens = self.context_manager.estimate_text_tokens(search_text)
-                if search_tokens > self.context_manager.get_compress_threshold("search"):
-                    search_text = await self.context_manager.compress_search_results(search_text)
-
-                paper_tokens = self.context_manager.estimate_text_tokens(paper_text)
-                if paper_tokens > self.context_manager.get_compress_threshold("paper"):
-                    paper_text = await self.context_manager.compress_paper_results(
-                        paper_text,
-                    )
+        evidence_cards = []
+        for result in sub_question_results:
+            evidence_cards.extend(self._get_sq_field(result, "evidence_cards", []))
+        evidence_summary = summarize_evidence_coverage(
+            deduplicate_cards(evidence_cards)
+        )
+        if not evidence_cards:
+            evidence_summary = (
+                f"网页证据 {len(search_results)} 条，论文证据 {len(paper_results)} 条。"
+                "详细事实核验已在逐子问题评审完成。"
+            )
 
         user_prompt = self.context_prompt_prefix() + OVERALL_COHERENCE_CRITIC_USER_PROMPT.format(
             query=query,
             all_findings=all_findings,
-            search_results=search_text,
-            paper_results=paper_text,
+            evidence_summary=evidence_summary,
         )
 
-        response = await self.llm.generate(
+        response = await self.generate(
             prompt=user_prompt,
             system_prompt=OVERALL_COHERENCE_CRITIC_SYSTEM_PROMPT,
+            max_tokens=settings.critic_max_tokens,
         )
 
         critique_data = self._parse_json_response(response)
@@ -486,6 +666,15 @@ class CriticAgent(BaseAgent):
                 "issues": critique_data.get("issues", []),
                 "feedback": critique_data.get("feedback", ""),
                 "revision_suggestions": critique_data.get("revision_suggestions", []),
+                "blocking_sub_question_ids": critique_data.get(
+                    "blocking_sub_question_ids", []
+                ),
+                "writer_revision_suggestions": critique_data.get(
+                    "writer_revision_suggestions", []
+                ),
+                "missing_research_topics": critique_data.get(
+                    "missing_research_topics", []
+                ),
                 "problematic_sub_question_ids": critique_data.get("problematic_sub_question_ids", []),
             }
         else:
@@ -497,6 +686,9 @@ class CriticAgent(BaseAgent):
                 "issues": [],
                 "feedback": "整体一致性审查结果解析失败",
                 "revision_suggestions": [],
+                "blocking_sub_question_ids": [],
+                "writer_revision_suggestions": [],
+                "missing_research_topics": [],
                 "problematic_sub_question_ids": [],
             }
 
@@ -513,8 +705,6 @@ class CriticAgent(BaseAgent):
     def _log_sq_score_details(self, sq_id: str, critique: dict) -> None:
         scores = critique.get("scores", {})
         score_details = critique.get("score_details", {})
-        total_score = critique.get("total_score", 0)
-
         dimension_names = {
             "factual_accuracy": "事实准确性",
             "completeness": "完整性",

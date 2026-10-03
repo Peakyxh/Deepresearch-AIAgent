@@ -5,7 +5,7 @@
 确保状态在各个 Agent 之间传递时类型安全。
 """
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class SubQuestion(BaseModel):
@@ -59,6 +59,9 @@ class SubQuestionResult(BaseModel):
     )
     sources: list[dict] = Field(
         default_factory=list, description="本子问题的参考文献来源"
+    )
+    evidence_cards: list[dict] = Field(
+        default_factory=list, description="供下游复用的紧凑结构化证据卡片"
     )
 
 
@@ -121,6 +124,12 @@ class ResearchState(BaseModel):
         default_factory=list,
         description="参考文献来源列表，每项包含 title/url/type/year/authors",
     )
+    evidence_cards: list[dict] = Field(
+        default_factory=list, description="跨子问题去重后的证据卡片"
+    )
+    token_usage: dict = Field(
+        default_factory=dict, description="按 Agent 汇总的估算输入/输出 token"
+    )
 
     # ==================== Critic 输出 ====================
     critique_passed: bool = Field(default=False, description="审查是否通过")
@@ -162,6 +171,18 @@ class ResearchState(BaseModel):
     overall_coherence_passed: bool = Field(
         default=False, description="整体一致性是否通过"
     )
+    critique_outcome: str = Field(
+        default="",
+        description="审查路由结果：passed/conditional_pass/research_retry/forced_writer",
+    )
+    writer_revision_suggestions: list[str] = Field(
+        default_factory=list,
+        description="无需重新搜索、由 Writer 在成稿阶段处理的修改建议",
+    )
+    missing_research_topics: list[dict] = Field(
+        default_factory=list,
+        description="整体评审识别出的阻断性缺失研究主题",
+    )
 
     # ==================== Writer 输出 ====================
     report: str = Field(default="", description="最终研究报告")
@@ -171,12 +192,11 @@ class ResearchState(BaseModel):
     # ==================== 流程控制 ====================
     current_step: str = Field(default="planner", description="当前执行阶段")
     retry_count: int = Field(default=0, description="重试次数")
-    max_retries: int = Field(default=2, description="最大重试次数")
+    max_retries: int = Field(default=1, description="最大补充研究次数")
     use_orchestrator: bool = Field(
         default=True,
         description="是否使用 Orchestrator 模式（False 则回退到串行 Researcher）",
     )
     error: str = Field(default="", description="错误信息")
 
-    class Config:
-        arbitrary_types_allowed = True
+    model_config = ConfigDict(arbitrary_types_allowed=True)

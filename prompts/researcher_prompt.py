@@ -94,7 +94,7 @@ EXTRA_KEYWORDS_USER_PROMPT = """请根据以下信息生成补充搜索关键词
 {critique_feedback}
 
 请输出以下 JSON 格式：
-{
+{{
     "extra_keywords_zh": ["补充中文关键词1", "补充中文关键词2"],
     "extra_keywords_en": ["supplementary English keyword 1", "supplementary English keyword 2"]
-}"""
+}}"""

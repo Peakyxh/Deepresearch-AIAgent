@@ -20,7 +20,7 @@ Orchestrator 负责根据 Planner 的子问题依赖关系进行调度：
 """
 
 import logging
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 from agents.clarifier_agent import ClarifierAgent
 from agents.critic_agent import CriticAgent
@@ -64,7 +64,12 @@ class ResearchWorkflow:
     - writer → END: 报告生成完成
     """
 
-    def __init__(self, session_id: str | None = None):
+    def __init__(
+        self,
+        session_id: str | None = None,
+        interaction_handler: Any = None,
+        event_callback: Callable[[dict[str, Any]], None] | None = None,
+    ):
         """
         初始化研究工作流
 
@@ -73,6 +78,7 @@ class ResearchWorkflow:
                         为 None 则从配置读取（默认自动生成 UUID）。
         """
         self.logger = logging.getLogger("ResearchWorkflow")
+        self.event_callback = event_callback
 
         self.session_id = session_id or settings.effective_session_id
         self.logger.info(f"会话 ID: {self.session_id}")
@@ -86,7 +92,9 @@ class ResearchWorkflow:
 
         self.context_manager = ContextManager(llm=self.llm)
 
-        self.clarifier = ClarifierAgent(llm=self.llm)
+        self.clarifier = ClarifierAgent(
+            llm=self.llm, interaction_handler=interaction_handler
+        )
         self.planner = PlannerAgent(llm=self.llm)
         self.researcher = ResearcherAgent(llm=self.llm, context_manager=self.context_manager)
         self.orchestrator = OrchestratorAgent(
@@ -95,7 +103,21 @@ class ResearchWorkflow:
             researcher=self.researcher,
         )
         self.critic = CriticAgent(llm=self.critic_llm, context_manager=self.context_manager)
-        self.writer = WriterAgent(llm=self.llm, context_manager=self.context_manager)
+        self.writer = WriterAgent(
+            llm=self.llm,
+            context_manager=self.context_manager,
+            interaction_handler=interaction_handler,
+        )
+
+        for agent in (
+            self.clarifier,
+            self.planner,
+            self.researcher,
+            self.orchestrator,
+            self.critic,
+            self.writer,
+        ):
+            agent.event_callback = event_callback
 
         self.vector_store = VectorStore(
             persist_dir=settings.chroma_persist_dir,
@@ -106,6 +128,80 @@ class ResearchWorkflow:
         self.workflow = self._build_workflow()
 
         self.logger.info(f"ResearchWorkflow 初始化完成，会话ID: {self.session_id}")
+
+    def _emit_event(self, event_type: str, **payload: Any) -> None:
+        if not self.event_callback:
+            return
+        try:
+            self.event_callback({"type": event_type, **payload})
+        except Exception as exc:
+            self.logger.debug("工作流事件回调失败: %s", exc)
+
+    def _collect_token_usage(self) -> dict[str, Any]:
+        """Collect approximate prompt/output usage from workflow agents."""
+        agents = [
+            self.clarifier,
+            self.planner,
+            self.researcher,
+            self.orchestrator,
+            self.critic,
+            self.writer,
+        ]
+        if self.orchestrator._sub_agent is not None:
+            agents.append(self.orchestrator._sub_agent)
+
+        by_agent: dict[str, dict[str, int]] = {}
+        for agent in agents:
+            usage = dict(agent.token_usage)
+            if not usage.get("calls"):
+                continue
+            bucket = by_agent.setdefault(
+                agent.name,
+                {"calls": 0, "input_tokens": 0, "output_tokens": 0},
+            )
+            for key in bucket:
+                bucket[key] += int(usage.get(key, 0))
+
+        compression_usage = dict(self.context_manager.token_usage)
+        if compression_usage.get("calls"):
+            by_agent["ContextCompression"] = {
+                key: int(compression_usage.get(key, 0))
+                for key in ("calls", "input_tokens", "output_tokens")
+            }
+
+        return {
+            "estimated": True,
+            "by_agent": by_agent,
+            "total_calls": sum(item["calls"] for item in by_agent.values()),
+            "input_tokens": sum(item["input_tokens"] for item in by_agent.values()),
+            "output_tokens": sum(item["output_tokens"] for item in by_agent.values()),
+        }
+
+    def _reset_token_usage(self) -> None:
+        for agent in (
+            self.clarifier,
+            self.planner,
+            self.researcher,
+            self.orchestrator,
+            self.critic,
+            self.writer,
+        ):
+            agent.token_usage = {
+                "calls": 0,
+                "input_tokens": 0,
+                "output_tokens": 0,
+            }
+        if self.orchestrator._sub_agent is not None:
+            self.orchestrator._sub_agent.token_usage = {
+                "calls": 0,
+                "input_tokens": 0,
+                "output_tokens": 0,
+            }
+        self.context_manager.token_usage = {
+            "calls": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+        }
 
     def _build_workflow(self) -> Workflow:
         """
@@ -161,6 +257,7 @@ class ResearchWorkflow:
         self.logger.info("=" * 40)
         self.logger.info("📍 进入 Clarifier 阶段")
         self.logger.info("=" * 40)
+        self._emit_event("phase_started", phase="clarifier", label="意图澄清")
 
         state = await self.clarifier.run(state)
 
@@ -175,6 +272,7 @@ class ResearchWorkflow:
             )
 
         await self.context_manager.maybe_compress()
+        self._emit_event("phase_completed", phase="clarifier")
         return state
 
     async def _planner_node(self, state: dict[str, Any]) -> dict[str, Any]:
@@ -192,6 +290,7 @@ class ResearchWorkflow:
         self.logger.info("=" * 40)
         self.logger.info("📍 进入 Planner 阶段")
         self.logger.info("=" * 40)
+        self._emit_event("phase_started", phase="planner", label="研究规划")
 
         try:
             await self.memory_manager.initialize()
@@ -228,6 +327,15 @@ class ResearchWorkflow:
                 self.logger.info(f"  [{sq.id}] {sq.question} ({deps})")
 
         await self.context_manager.maybe_compress()
+        self._emit_event(
+            "phase_completed",
+            phase="planner",
+            sub_questions=[
+                sq.model_dump() if hasattr(sq, "model_dump") else sq
+                for sq in state.get("structured_sub_questions", [])
+            ],
+            research_plan=state.get("research_plan", ""),
+        )
         return state
 
     async def _orchestrator_node(self, state: dict[str, Any]) -> dict[str, Any]:
@@ -245,6 +353,7 @@ class ResearchWorkflow:
         self.logger.info("=" * 40)
         self.logger.info("📍 进入 Orchestrator 阶段")
         self.logger.info("=" * 40)
+        self._emit_event("phase_started", phase="research", label="并行研究")
 
         # 在 orchestrator 运行前，检索缓存的搜索结果和论文，避免重复搜索
         try:
@@ -339,6 +448,15 @@ class ResearchWorkflow:
             self.logger.info("串行 Researcher 完成")
 
         await self.context_manager.maybe_compress()
+        self._emit_event(
+            "phase_completed",
+            phase="research",
+            source_count=len(state.get("sources", [])),
+            sub_question_results=[
+                item.model_dump() if hasattr(item, "model_dump") else item
+                for item in state.get("sub_question_results", [])
+            ],
+        )
         return state
 
     async def _critic_node(self, state: dict[str, Any]) -> dict[str, Any]:
@@ -356,8 +474,21 @@ class ResearchWorkflow:
         self.logger.info("=" * 40)
         self.logger.info("📍 进入 Critic 阶段")
         self.logger.info("=" * 40)
+        self._emit_event("phase_started", phase="critic", label="质量审查")
 
         state = await self.critic.run(state)
+
+        self._emit_event(
+            "phase_completed",
+            phase="critic",
+            score=state.get("critique_total_score", 0),
+            passed=state.get("critique_passed", False),
+            outcome=state.get("critique_outcome", ""),
+            feedback=state.get("critique_feedback", ""),
+            writer_revision_suggestions=state.get(
+                "writer_revision_suggestions", []
+            ),
+        )
 
         return state
 
@@ -376,6 +507,7 @@ class ResearchWorkflow:
         self.logger.info("=" * 40)
         self.logger.info("📍 进入 Writer 阶段")
         self.logger.info("=" * 40)
+        self._emit_event("phase_started", phase="writer", label="报告撰写")
 
         state = await self.writer.run(state)
 
@@ -394,6 +526,11 @@ class ResearchWorkflow:
         self.logger.info("=" * 40)
         self.logger.info("✅ 研究工作流完成！")
         self.logger.info("=" * 40)
+        self._emit_event(
+            "phase_completed",
+            phase="writer",
+            report=state.get("report", ""),
+        )
 
         return state
 
@@ -431,6 +568,7 @@ class ResearchWorkflow:
             最终的研究状态（包含报告）
         """
         self.logger.info(f"🔬 开始深度研究: {query}")
+        self._reset_token_usage()
 
         # 会话隔离：清空上一轮研究遗留的上下文与关键信息，避免跨问题串味
         self.context_manager.clear()
@@ -451,6 +589,8 @@ class ResearchWorkflow:
             "paper_results": [],
             "findings": "",
             "sources": [],
+            "evidence_cards": [],
+            "token_usage": {},
             "critique_passed": False,
             "critique_feedback": "",
             "critique_feedback_for_researcher": "",
@@ -464,18 +604,22 @@ class ResearchWorkflow:
             "overall_coherence_score": 0,
             "overall_coherence_feedback": "",
             "overall_coherence_passed": False,
+            "critique_outcome": "",
+            "writer_revision_suggestions": [],
+            "missing_research_topics": [],
             "report": "",
             "report_outline": "",
             "user_outline_feedback": "",
             "current_step": "planner",
             "retry_count": 0,
-            "max_retries": 2,
+            "max_retries": settings.critique_max_retries,
             "use_orchestrator": settings.orchestrator_enabled,
             "error": "",
         }
 
         try:
             final_state = await self.workflow.run(initial_state)
+            final_state["token_usage"] = self._collect_token_usage()
 
             result = ResearchState(**final_state)
             return result

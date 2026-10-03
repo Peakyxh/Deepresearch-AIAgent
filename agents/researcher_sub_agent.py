@@ -17,6 +17,11 @@ from academic.academic_factory import AcademicFactory
 from config import settings
 from memory.context_manager import ContextManager
 from workflows.state import SubQuestion, SubQuestionResult
+from workflows.evidence import (
+    build_evidence_cards,
+    select_paper_evidence,
+    select_web_evidence,
+)
 from prompts.researcher_prompt import (
     RESEARCHER_SYSTEM_PROMPT,
     RESEARCHER_CACHED_SECTION,
@@ -176,6 +181,30 @@ class ResearcherSubAgent(BaseAgent):
         filtered_search_results = self._filter_search_results(unique_search_results)
         filtered_paper_results = self._filter_and_sort_papers(unique_paper_results)
 
+        evidence_query = " ".join(
+            [
+                query,
+                sub_question.question,
+                *sub_question.keywords_zh,
+                *sub_question.keywords_en,
+            ]
+        )
+        filtered_search_results = select_web_evidence(
+            filtered_search_results,
+            evidence_query,
+            settings.max_web_sources_per_sub_question,
+            settings.max_sources_per_domain,
+        )
+        filtered_paper_results = select_paper_evidence(
+            filtered_paper_results,
+            evidence_query,
+            settings.max_paper_sources_per_sub_question,
+        )
+        self.log(
+            f"  证据预算后：{len(filtered_search_results)} 条网页，"
+            f"{len(filtered_paper_results)} 篇论文"
+        )
+
         search_text = self._format_search_results(filtered_search_results)
         paper_text = self._format_paper_results(filtered_paper_results)
 
@@ -252,9 +281,10 @@ class ResearcherSubAgent(BaseAgent):
             paper_results=paper_text,
         )
 
-        response = await self.llm.generate(
+        response = await self.generate(
             prompt=user_prompt,
             system_prompt=RESEARCHER_SYSTEM_PROMPT,
+            max_tokens=settings.researcher_max_tokens,
         )
 
         findings_data = self._parse_json_response(response)
@@ -275,6 +305,13 @@ class ResearcherSubAgent(BaseAgent):
                 "authors": ", ".join(p.authors[:3]) + ("等" if len(p.authors) > 3 else ""),
             })
 
+        evidence_cards = build_evidence_cards(
+            filtered_search_results,
+            filtered_paper_results,
+            sub_question.id,
+            settings.evidence_excerpt_chars,
+        )
+
         result = SubQuestionResult(
             sub_question_id=sub_question.id,
             sub_question=sub_question.question,
@@ -284,6 +321,7 @@ class ResearcherSubAgent(BaseAgent):
             key_insights=findings_data.get("key_insights", []) if findings_data else [],
             information_gaps=findings_data.get("information_gaps", []) if findings_data else [],
             sources=sources,
+            evidence_cards=evidence_cards,
         )
 
         self.log(

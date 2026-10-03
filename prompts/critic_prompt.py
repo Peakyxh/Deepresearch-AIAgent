@@ -234,8 +234,22 @@ OVERALL_COHERENCE_CRITIC_SYSTEM_PROMPT = UNTRUSTED_CONTENT_POLICY + """你是一
         "具体修正建议1（包含搜索关键词建议）",
         "具体修正建议2（包含搜索关键词建议）"
     ],
+    "blocking_sub_question_ids": [
+        "只有必须重新检索才能修复的子问题id；没有则返回空列表"
+    ],
+    "writer_revision_suggestions": [
+        "可由 Writer 通过重组结构、补充限定语或说明局限性来修复的问题"
+    ],
+    "missing_research_topics": [
+        {
+            "question": "原始研究范围中完全缺失、必须补充检索的主题",
+            "reason": "为什么这是阻断性缺失",
+            "keywords_zh": ["中文检索词"],
+            "keywords_en": ["English search keyword"]
+        }
+    ],
     "problematic_sub_question_ids": [
-        "导致一致性问题的子问题id，如 sq_1"
+        "存在任何程度问题的子问题id，仅用于诊断，不代表必须重新研究"
     ]
 }
 
@@ -262,9 +276,13 @@ OVERALL_COHERENCE_CRITIC_SYSTEM_PROMPT = UNTRUSTED_CONTENT_POLICY + """你是一
    - 0-9分：大量来源重复或单一
 
 重要规则：
-- 如果某个子问题的发现与其他子问题矛盾，将其 id 加入 problematic_sub_question_ids
-- 如果某个子问题的发现质量差导致整体不一致，将其 id 加入 problematic_sub_question_ids
-- problematic_sub_question_ids 中的子问题将被重新研究
+- problematic_sub_question_ids 只用于诊断，轻微问题也可以列入，但不会自动触发重新研究
+- 只有关键事实与来源明显不符、核心范围完全缺失、结论直接冲突、关键结论无可靠来源时，
+  才将 id 加入 blocking_sub_question_ids
+- 章节组织、逻辑衔接、表达不均衡、来源略集中、需要补充限定语等问题，放入
+  writer_revision_suggestions，不要放入 blocking_sub_question_ids
+- 原始问题要求的核心主题完全没有任何子问题覆盖时，放入 missing_research_topics；
+  不要随意用已有但无关的子问题代替缺失主题
 - 修正建议要具体，包含建议搜索的关键词
 - 只输出 JSON，不要输出任何解释性文字
 """
@@ -275,10 +293,7 @@ OVERALL_COHERENCE_CRITIC_USER_PROMPT = """请对以下多个子问题的研究�
 各子问题的研究发现：
 {all_findings}
 
-网页搜索结果（用于交叉验证）：
-{search_results}
-
-论文搜索结果（用于交叉验证）：
-{paper_results}
+证据覆盖摘要（具体事实与来源匹配已在逐子问题评审中核验）：
+{evidence_summary}
 
 请严格按照评分标准打分，并输出 JSON 格式的审查结果。"""

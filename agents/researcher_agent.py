@@ -22,6 +22,11 @@ from academic.base_academic import BaseAcademic, PaperResult
 from academic.academic_factory import AcademicFactory
 from config import settings
 from memory.context_manager import ContextManager
+from workflows.evidence import (
+    build_evidence_cards,
+    select_paper_evidence,
+    select_web_evidence,
+)
 from prompts.researcher_prompt import (
     RESEARCHER_SYSTEM_PROMPT,
     RESEARCHER_USER_PROMPT,
@@ -161,12 +166,23 @@ class ResearcherAgent(BaseAgent):
         # 1. 过滤内容过短的碎片结果（如只有标题没有摘要的）
         # 2. 截断内容过长的结果（避免原始网页内容淹没有效信息）
         filtered_search_results = self._filter_search_results(unique_search_results)
+        filtered_search_results = select_web_evidence(
+            filtered_search_results,
+            f"{query} {research_plan}",
+            settings.max_web_sources_per_sub_question,
+            settings.max_sources_per_domain,
+        )
         self.log(f"内容质量过滤：{len(unique_search_results)} → {len(filtered_search_results)} 条网页结果")
 
         # ==================== 论文时间过滤 + 引用排序 ====================
         # 1. 过滤年份过早的论文（默认只保留 2020 年及之后）
         # 2. 按引用次数降序排列（高引用论文更权威，优先展示）
         filtered_paper_results = self._filter_and_sort_papers(unique_paper_results)
+        filtered_paper_results = select_paper_evidence(
+            filtered_paper_results,
+            f"{query} {research_plan}",
+            settings.max_paper_sources_per_sub_question,
+        )
         self.log(f"论文质量过滤：{len(unique_paper_results)} → {len(filtered_paper_results)} 篇论文")
 
         # 将搜索结果存入状态
@@ -190,6 +206,12 @@ class ResearcherAgent(BaseAgent):
                 "authors": ", ".join(p.authors[:3]) + ("等" if len(p.authors) > 3 else ""),
             })
         state["sources"] = sources
+        state["evidence_cards"] = build_evidence_cards(
+            filtered_search_results,
+            filtered_paper_results,
+            "serial",
+            settings.evidence_excerpt_chars,
+        )
         self.log(f"收集了 {len(sources)} 条参考文献来源")
 
         # 格式化搜索结果为文本，供 LLM 整合
@@ -254,9 +276,10 @@ class ResearcherAgent(BaseAgent):
             paper_results=paper_text,
         )
 
-        response = await self.llm.generate(
+        response = await self.generate(
             prompt=user_prompt,
             system_prompt=RESEARCHER_SYSTEM_PROMPT,
+            max_tokens=settings.researcher_max_tokens,
         )
 
         # 解析 LLM 返回的 JSON

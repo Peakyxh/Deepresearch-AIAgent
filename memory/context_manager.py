@@ -55,6 +55,7 @@ class ContextManager:
         self._llm = llm
         self.context: list[dict[str, Any]] = []
         self._key_info: list[str] = []
+        self.token_usage = {"calls": 0, "input_tokens": 0, "output_tokens": 0}
 
         self._compress_threshold_search = settings.context_compress_threshold_search
         self._compress_threshold_paper = settings.context_compress_threshold_paper
@@ -69,6 +70,18 @@ class ContextManager:
 
     def set_llm(self, llm: Any) -> None:
         self._llm = llm
+
+    async def _generate(self, prompt: str, system_prompt: str, max_tokens: int) -> str:
+        """Generate compression text and retain an approximate usage total."""
+        response = await self._llm.generate(
+            prompt=prompt,
+            system_prompt=system_prompt,
+            max_tokens=max_tokens,
+        )
+        self.token_usage["calls"] += 1
+        self.token_usage["input_tokens"] += max(1, len(f"{system_prompt}\n{prompt}") // 3)
+        self.token_usage["output_tokens"] += max(1, len(response or "") // 3)
+        return response
 
     def add_context(self, role: str, content: str, is_key: bool = False, query: str = "") -> None:
         """
@@ -522,7 +535,7 @@ class ContextManager:
         compress_instruction = instruction or default_instruction
 
         try:
-            compressed = await self._llm.generate(
+            compressed = await self._generate(
                 prompt=f"{compress_instruction}\n\n---\n\n{text}",
                 system_prompt="你是一个文本压缩助手，你的任务是在保留所有关键信息的前提下，将长文本压缩为更短的版本。不要丢失任何重要的事实、数据或结论。",
                 max_tokens=min(target_tokens * 2, settings.llm_max_tokens),
@@ -534,7 +547,7 @@ class ContextManager:
 
             if compressed_tokens > limit and self._llm:
                 logger.warning(f"压缩后仍超限 ({compressed_tokens}/{limit})，进行二次压缩")
-                compressed = await self._llm.generate(
+                compressed = await self._generate(
                     prompt=(
                         f"以下文本仍然过长（{compressed_tokens} tokens），请进一步压缩到约 {target_tokens} tokens，"
                         f"保留最核心的信息：\n\n{compressed}"
@@ -763,7 +776,7 @@ class ContextManager:
         text = "\n".join(text_parts)
 
         try:
-            summary = await self._llm.generate(
+            summary = await self._generate(
                 prompt=(
                     "请将以下对话内容压缩为一段简洁的摘要，要求：\n"
                     "1. 保留所有关键信息、数据和结论\n"

@@ -19,6 +19,7 @@ from agents.base_agent import BaseAgent
 from config import settings
 from llm.base_llm import BaseLLM
 from memory.context_manager import ContextManager
+from workflows.evidence import format_evidence_catalog
 from prompts.writer_prompt import (
     WRITER_SYSTEM_PROMPT,
     WRITER_USER_PROMPT,
@@ -46,10 +47,16 @@ class WriterAgent(BaseAgent):
     7. 将结果写入工作流状态
     """
 
-    def __init__(self, llm: BaseLLM | None = None, context_manager: ContextManager | None = None):
+    def __init__(
+        self,
+        llm: BaseLLM | None = None,
+        context_manager: ContextManager | None = None,
+        interaction_handler: Any = None,
+    ):
         super().__init__(name="Writer", llm=llm, context_manager=context_manager)
         self.interactive = settings.writer_interactive
         self.max_tokens = settings.writer_max_tokens
+        self.interaction_handler = interaction_handler
 
     async def _execute(self, state: dict[str, Any]) -> dict[str, Any]:
         """
@@ -64,15 +71,29 @@ class WriterAgent(BaseAgent):
         query = state.get("query", "")
         findings = state.get("findings", "")
         critique = state.get("critique_feedback", "")
+        writer_suggestions = state.get("writer_revision_suggestions", [])
+        pending_suggestions = [
+            item for item in writer_suggestions if item and item not in critique
+        ]
+        if pending_suggestions:
+            suggestion_text = "\n".join(f"- {item}" for item in pending_suggestions)
+            critique = (
+                f"{critique}\n\n写作阶段必须处理的修订建议:\n{suggestion_text}"
+            ).strip()
         search_results = state.get("search_results", [])
         paper_results = state.get("paper_results", [])
         sources = state.get("sources", [])
+        evidence_cards = state.get("evidence_cards", [])
 
         self.log("开始撰写研究报告...")
 
         # 格式化搜索结果和论文结果，供 LLM 引用
-        search_text = self._format_sources(search_results, "网页")
-        paper_text = self._format_sources(paper_results, "论文")
+        if evidence_cards:
+            search_text, paper_text = format_evidence_catalog(evidence_cards)
+            self.log(f"使用 {len(evidence_cards)} 张紧凑证据卡片撰写报告")
+        else:
+            search_text = self._format_sources(search_results, "网页")
+            paper_text = self._format_sources(paper_results, "论文")
 
         # ==================== 语义压缩 ====================
         findings, search_text, paper_text = await self._compress_if_needed(
@@ -176,9 +197,10 @@ class WriterAgent(BaseAgent):
             critique=critique if critique else "无审查反馈",
         )
 
-        outline_response = await self.llm.generate(
+        outline_response = await self.generate(
             prompt=outline_prompt,
             system_prompt=WRITER_OUTLINE_SYSTEM_PROMPT,
+            max_tokens=settings.writer_outline_max_tokens,
         )
 
         outline_data = self._parse_json_response(outline_response)
@@ -198,7 +220,9 @@ class WriterAgent(BaseAgent):
         state["report_outline"] = outline_text
 
         # ==================== 用户交互：审核大纲 ====================
-        user_feedback = self._interact_with_user_on_outline(outline_display)
+        user_feedback = await self._interact_with_user_on_outline(
+            outline_display, outline_text
+        )
 
         # 保存用户反馈到状态
         state["user_outline_feedback"] = user_feedback
@@ -216,7 +240,7 @@ class WriterAgent(BaseAgent):
             paper_results=paper_text,
         )
 
-        report = await self.llm.generate(
+        report = await self.generate(
             prompt=user_prompt,
             system_prompt=WRITER_WITH_OUTLINE_SYSTEM_PROMPT,
             max_tokens=self.max_tokens,
@@ -244,7 +268,7 @@ class WriterAgent(BaseAgent):
         )
 
         self.log("正在调用 LLM 生成研究报告...")
-        report = await self.llm.generate(
+        report = await self.generate(
             prompt=user_prompt,
             system_prompt=WRITER_SYSTEM_PROMPT,
             max_tokens=self.max_tokens,
@@ -294,7 +318,9 @@ class WriterAgent(BaseAgent):
 
         return "\n".join(lines)
 
-    def _interact_with_user_on_outline(self, outline_display: str) -> str:
+    async def _interact_with_user_on_outline(
+        self, outline_display: str, outline_text: str
+    ) -> str:
         """
         展示大纲给用户，获取修改建议
 
@@ -304,7 +330,23 @@ class WriterAgent(BaseAgent):
         Returns:
             用户的修改建议，空字符串表示无修改
         """
-        print(f"\n📝 报告大纲已生成，请查看：")
+        if self.interaction_handler:
+            response = await self.interaction_handler.request(
+                kind="outline_review",
+                payload={
+                    "outline": outline_display,
+                    "outline_json": outline_text,
+                },
+            )
+            if isinstance(response, dict):
+                return str(response.get("feedback", "")).strip()
+            return ""
+
+        return self._interact_with_user_on_outline_cli(outline_display)
+
+    def _interact_with_user_on_outline_cli(self, outline_display: str) -> str:
+        """CLI 兼容路径：保留原有终端大纲审核。"""
+        print("\n📝 报告大纲已生成，请查看：")
         print("━" * 50)
         print(outline_display)
         print("━" * 50)
@@ -371,10 +413,10 @@ class WriterAgent(BaseAgent):
             添加了元信息的完整报告
         """
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        metadata = f"> 📋 **DeepResearch Agent 研究报告**\n"
+        metadata = "> 📋 **DeepResearch Agent 研究报告**\n"
         metadata += f"> 研究问题：{query}\n"
         metadata += f"> 生成时间：{timestamp}\n"
-        metadata += f"> ---\n\n"
+        metadata += "> ---\n\n"
 
         return metadata + report
 
