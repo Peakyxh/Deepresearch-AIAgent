@@ -1,6 +1,39 @@
 # DeepResearch Agent
 
-> 多 Agent 协作的深度研究 AI Agent —— 意图澄清、智能规划、并行研究、两级审查、交互式写作，生成带引用的结构化研究报告。
+> 带可视化 Web 工作区的多 Agent 深度研究系统：从意图澄清、任务规划、并行检索、质量审查到报告生成，全流程实时可见，并输出带来源的结构化研究报告。
+
+DeepResearch Agent 将复杂问题拆解为相互关联的子问题，由多个 Researcher Sub-Agent 并行完成网页与学术检索，再通过两级 Critic 审查和交互式 Writer 生成最终报告。除了命令行模式，项目还提供基于 **Next.js + FastAPI + SSE** 的三栏研究工作区，可实时查看执行过程、研究计划、引用来源和最终报告。
+
+## 主要能力
+
+- **可视化研究工作区**：统一管理历史任务，实时展示 Agent 执行轨迹、阶段状态与 Token 用量
+- **关键节点人工确认**：支持研究目标澄清和报告大纲审核，确认后从暂停点继续运行
+- **多 Agent 并行研究**：根据依赖关系拓扑调度子问题，并自动传递上游研究结果
+- **来源与报告分栏查看**：集中展示去重后的网页、论文来源，并支持 Markdown 报告预览与复制
+- **质量控制与自动补研**：逐子问题审查与整体一致性审查结合，只重试未达标部分
+- **多提供者可切换**：支持 OpenAI、DeepSeek、Qwen、vLLM 及多种网页和学术搜索服务
+
+---
+
+## 界面预览
+
+### 1. 创建研究任务
+
+在首页输入需要深入研究的问题，也可以直接选择示例问题开始。左侧用于管理研究任务，右侧会随任务进度展示计划、来源和报告。
+
+![DeepResearch Agent 初始界面](docs/images/初始界面.jpg)
+
+### 2. 实时查看研究过程
+
+研究运行期间，主工作区会持续输出 Agent 执行事件；右侧同步展示当前阶段、Token 用量、研究策略以及子问题之间的依赖关系。
+
+![DeepResearch Agent 运行界面](docs/images/运行界面.jpg)
+
+### 3. 查看最终研究报告
+
+研究和审查完成后，可在右侧“报告”面板直接阅读或复制完整 Markdown 报告，并在“来源”面板核对引用材料。
+
+![DeepResearch Agent 报告生成界面](docs/images/最后生成界面.jpg)
 
 ---
 
@@ -196,6 +229,13 @@ deepresearch_agent/
 │   ├── state.py                # ResearchState + SubQuestion + SubQuestionResult
 │   ├── dag_engine.py           # DAG 引擎（拓扑并发 + 条件路由 + 执行快照）
 │   └── research_workflow.py    # 完整研究工作流
+├── api/                        # FastAPI 服务层（不改写 Agent 核心逻辑）
+│   ├── main.py                 # REST + SSE API 入口
+│   ├── run_manager.py          # 任务状态、结构化事件、暂停/恢复
+│   └── schemas.py              # API 请求和响应模型
+├── frontend/                   # TypeScript + Next.js 前端
+│   ├── app/                    # 三栏 Codex 风格工作区
+│   └── lib/                    # API 客户端和类型契约
 ├── prompts/                    # 5 组 Prompt 模板
 ├── evaluation/                 # 评估模块（质量评估 + 重复性评估 + 事实核查）
 │   ├── evaluator.py            # 统一评估器（整合三个子评估器）
@@ -219,6 +259,8 @@ deepresearch_agent/
 | 技术 | 用途 |
 |------|------|
 | Python 3.11+ | 开发语言 |
+| FastAPI + SSE | 任务 API、实时事件流、人机交互恢复 |
+| TypeScript + Next.js | Web 工作区（三栏任务、过程、产物界面） |
 | 自研 DAG Engine | 工作流引擎（0 外部依赖，节点+条件边+拓扑并发+执行快照） |
 | Pydantic / pydantic-settings | 数据验证 + 60+ 配置项强类型管理 |
 | ChromaDB | 向量存储（3 种记忆类型 + 会话隔离） |
@@ -229,11 +271,13 @@ deepresearch_agent/
 
 ## 快速开始
 
+请先准备 Python 3.11+、Node.js 和 npm。
+
 ### 1. 克隆项目
 
 ```bash
-git clone https://github.com/your-username/DeepResearch-AIAgent.git
-cd DeepResearch-AIAgent/deepresearch_agent
+git clone https://github.com/Peakyxh/Deepresearch-AIAgent.git
+cd Deepresearch-AIAgent/deepresearch_agent
 ```
 
 ### 2. 创建虚拟环境
@@ -272,13 +316,36 @@ SEARCH_PROVIDER=tavily      # 可选: tavily / serpapi / bing / bocha
 ACADEMIC_PROVIDER=arxiv     # 可选: arxiv / semantic_scholar / openalex
 ```
 
-### 5. 运行
+### 5. 运行 Web 工作区（推荐）
+
+Web 模式由两个进程组成：FastAPI 只负责封装现有 Python 工作流，Next.js
+负责界面。核心 Agent、Prompt、搜索和评审逻辑仍由原 Python 模块执行。
 
 ```bash
-# 交互模式（推荐）
+# 终端 1：在仓库根目录启动 API
+uvicorn api.main:app --reload --port 8000
+
+# 终端 2：启动前端
+cd frontend
+npm install
+npm run dev
+```
+
+浏览器打开 `http://localhost:3000`。如 API 不在本机 8000 端口，复制
+`frontend/.env.local.example` 为 `frontend/.env.local` 并修改
+`NEXT_PUBLIC_API_BASE_URL`。
+
+当前任务状态保存在 API 进程内存中：澄清问题和报告大纲出现时，工作流会暂停，
+前端提交回答后从原协程继续；重启 API 会清空任务。生产部署可在保持事件契约不变的
+前提下，将 `RunManager` 替换为 PostgreSQL/Redis 持久化实现。
+
+### 6. 使用命令行模式（可选）
+
+```bash
+# 交互模式
 python main.py
 
-# 命令行模式：直接传入研究问题
+# 直接传入研究问题
 python main.py "大语言模型的最新进展与挑战"
 
 # 快速测试：验证 LLM 和搜索是否正常
@@ -362,25 +429,34 @@ VLLM_MODEL=meta-llama/Llama-3-8B
 | `ORCHESTRATOR_ENABLED` | true | 是否启用 Orchestrator 调度（关闭后回退串行 Researcher） |
 | `ORCHESTRATOR_MAX_CONCURRENT` | 3 | 最大并行子 Agent 数量 |
 | `ORCHESTRATOR_DYNAMIC_ADJUST` | true | 是否启用动态调整（根据中间结果追加子问题） |
-| `ORCHESTRATOR_DYNAMIC_ADJUST_MAX_ROUNDS` | 3 | 动态调整最大追加次数 |
-| `ORCHESTRATOR_DYNAMIC_ADJUST_MAX_NEW_PER_ROUND` | 2 | 每次动态调整最多追加子问题数 |
-| `ORCHESTRATOR_DYNAMIC_ADJUST_MAX_TOTAL_APPENDS` | 2 | 动态调整总共最多追加子问题数 |
+| `ORCHESTRATOR_DYNAMIC_ADJUST_MAX_ROUNDS` | 1 | 完成原计划后最多进行一次动态扩题判断 |
+| `ORCHESTRATOR_DYNAMIC_ADJUST_MAX_NEW_PER_ROUND` | 1 | 每次动态调整最多追加子问题数 |
+| `ORCHESTRATOR_DYNAMIC_ADJUST_MAX_TOTAL_APPENDS` | 1 | 动态调整总共最多追加子问题数 |
 | `SUB_QUESTION_OVERLAP_THRESHOLD` | 0.5 | 子问题重叠判定阈值（Jaccard 相似度，0 禁用去重） |
 | `SEARCH_CONTENT_MIN_LENGTH` | 50 | 网页结果最小内容长度，低于此值过滤 |
-| `SEARCH_CONTENT_MAX_LENGTH` | 2000 | 网页结果最大内容长度，超过截断 |
+| `SEARCH_CONTENT_MAX_LENGTH` | 2000 | 单条网页进入候选池的最大内容长度 |
+| `MAX_WEB_SOURCES_PER_SUB_QUESTION` | 8 | 每个子问题进入 LLM 的网页证据上限 |
+| `MAX_PAPER_SOURCES_PER_SUB_QUESTION` | 4 | 每个子问题进入 LLM 的论文证据上限 |
+| `MAX_SOURCES_PER_DOMAIN` | 2 | 每个子问题同一域名的最大网页数 |
+| `EVIDENCE_EXCERPT_CHARS` | 600 | 下游复用的单张证据卡片摘录长度 |
 | `PAPER_MIN_YEAR` | 2020 | 论文年份过滤，0表示不过滤 |
 | `PAPER_SORT_BY_CITATION` | true | 论文按引用次数降序排列 |
 | `CRITIQUE_PASS_THRESHOLD` | 70 | 审查通过阈值（满分100） |
 | `CRITIQUE_CONDITIONAL_THRESHOLD` | 50 | 审查有条件通过阈值 |
 | `SUB_QUESTION_CRITIQUE_PASS_THRESHOLD` | 60 | 逐子问题评审通过阈值 |
-| `OVERALL_COHERENCE_PASS_THRESHOLD` | 60 | 整体一致性评审通过阈值 |
+| `OVERALL_COHERENCE_PASS_THRESHOLD` | 80 | 整体一致性直接通过阈值，非阻断问题交给 Writer |
+| `OVERALL_COHERENCE_CONDITIONAL_THRESHOLD` | 70 | 有条件通过阈值，仅阻断问题触发补研 |
+| `CRITIQUE_MAX_RETRIES` | 1 | Critic 最多触发的补充研究轮数 |
 | `WRITER_INTERACTIVE` | true | 是否启用两轮交互式写作 |
-| `WRITER_MAX_TOKENS` | 16384 | Writer 最大输出 token 数 |
+| `WRITER_MAX_TOKENS` | 12000 | Writer 报告最大输出 token 数 |
+| `WRITER_OUTLINE_MAX_TOKENS` | 2000 | Writer 大纲最大输出 token 数 |
+| `RESEARCHER_MAX_TOKENS` | 5000 | 单个 Researcher 最大输出 token 数 |
+| `CRITIC_MAX_TOKENS` | 2500 | 单次 Critic 最大输出 token 数 |
 | `CONTEXT_MAX_TOKENS` | 0 | 上下文最大 token 数（0 根据模型自动计算） |
 | `CONTEXT_WINDOW_USAGE_RATIO` | 0.25 | 上下文占模型窗口比例 |
 | `CONTEXT_WARNING_RATIO` | 0.6 | 轻量压缩触发比例 |
 | `CONTEXT_DIALOG_COMPRESS_RATIO` | 0.8 | 深度压缩触发比例 |
-| `LLM_MAX_TOKENS` | 8192 | LLM 默认最大输出 token |
+| `LLM_MAX_TOKENS` | 8192 | 未单独配置 Agent 时的默认最大输出 token |
 | `LLM_TEMPERATURE` | 0.3 | LLM 温度参数 |
 
 ---

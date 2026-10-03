@@ -31,10 +31,11 @@ class ClarifierAgent(BaseAgent):
     5. 将意图描述和澄清问答对写入工作流状态
     """
 
-    def __init__(self, llm: BaseLLM | None = None):
+    def __init__(self, llm: BaseLLM | None = None, interaction_handler: Any = None):
         super().__init__(name="Clarifier", llm=llm)
         self.max_rounds = settings.clarifier_max_rounds
         self.enabled = settings.clarifier_enabled
+        self.interaction_handler = interaction_handler
 
     async def _execute(self, state: dict[str, Any]) -> dict[str, Any]:
         """
@@ -72,7 +73,7 @@ class ClarifierAgent(BaseAgent):
                 self.log("问题已足够清晰，无需进一步澄清")
                 break
 
-            round_answers = self._interact_with_user(questions, round_num)
+            round_answers = await self._interact_with_user(questions, round_num)
 
             if round_answers is None:
                 self.log("用户跳过所有澄清问题")
@@ -115,13 +116,14 @@ class ClarifierAgent(BaseAgent):
             qa_lines = []
             for qa in existing_qa:
                 qa_lines.append(f"Q: {qa['question']}\nA: {qa['answer']}")
-            qa_context = f"\n\n已有的澄清问答：\n" + "\n".join(qa_lines)
+            qa_context = "\n\n已有的澄清问答：\n" + "\n".join(qa_lines)
 
         user_prompt = CLARIFIER_USER_PROMPT.format(query=query) + qa_context
 
-        response = await self.llm.generate(
+        response = await self.generate(
             prompt=user_prompt,
             system_prompt=CLARIFIER_SYSTEM_PROMPT,
+            max_tokens=settings.clarifier_max_tokens,
         )
 
         parsed = self._parse_json_response(response)
@@ -136,7 +138,7 @@ class ClarifierAgent(BaseAgent):
 
         return questions
 
-    def _interact_with_user(
+    async def _interact_with_user(
         self, questions: list[dict], round_num: int
     ) -> list[dict] | None:
         """
@@ -149,6 +151,28 @@ class ClarifierAgent(BaseAgent):
         Returns:
             问答对列表，如果用户跳过所有问题则返回 None
         """
+        if self.interaction_handler:
+            response = await self.interaction_handler.request(
+                kind="clarification",
+                payload={"round": round_num, "questions": questions},
+            )
+            answers = response.get("answers", []) if isinstance(response, dict) else []
+            normalized = []
+            for item in answers:
+                if not isinstance(item, dict):
+                    continue
+                question = str(item.get("question", "")).strip()
+                answer = str(item.get("answer", "")).strip()
+                if question and answer:
+                    normalized.append({"question": question, "answer": answer})
+            return normalized or None
+
+        return self._interact_with_user_cli(questions, round_num)
+
+    def _interact_with_user_cli(
+        self, questions: list[dict], round_num: int
+    ) -> list[dict] | None:
+        """CLI 兼容路径：保留原有终端交互。"""
         print(f"\n🤔 为了更好地理解您的研究需求，我有几个问题（第{round_num}轮）：")
         print("━" * 50)
 
@@ -169,7 +193,7 @@ class ClarifierAgent(BaseAgent):
                 print(f"       参考: {options_text}")
             if purpose:
                 print(f"       (目的: {purpose})")
-            print(f"       输入 'skip' 跳过此问题，'skip all' 跳过所有问题")
+            print("       输入 'skip' 跳过此问题，'skip all' 跳过所有问题")
 
             try:
                 answer = input("  > ").strip()
@@ -221,9 +245,10 @@ class ClarifierAgent(BaseAgent):
             qa_section=qa_section,
         )
 
-        response = await self.llm.generate(
+        response = await self.generate(
             prompt=user_prompt,
             system_prompt=CLARIFIER_SUMMARY_SYSTEM_PROMPT,
+            max_tokens=settings.clarifier_max_tokens,
         )
 
         return response.strip()

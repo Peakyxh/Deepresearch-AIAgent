@@ -29,6 +29,7 @@ from search.search_factory import SearchFactory
 from academic.academic_factory import AcademicFactory
 from config import settings
 from workflows.state import SubQuestion, SubQuestionResult
+from workflows.evidence import deduplicate_cards
 
 
 ORCHESTRATOR_ADJUST_PROMPT = """你是一个研究调度专家。根据以下已完成子问题的研究结果，判断是否需要追加新的子问题。
@@ -104,6 +105,7 @@ class OrchestratorAgent(BaseAgent):
                 academic_search=academic_search,
                 context_manager=self.context_manager,
             )
+            self._sub_agent.event_callback = self.event_callback
         return self._sub_agent
 
     async def _execute(self, state: dict[str, Any]) -> dict[str, Any]:
@@ -206,7 +208,13 @@ class OrchestratorAgent(BaseAgent):
                     sq_id, result = lr
                     completed_results[sq_id] = result
 
-            if settings.orchestrator_dynamic_adjust and dynamic_adjust_rounds < max_dynamic_rounds and total_appended < max_total_appends:
+            is_last_planned_layer = layer_idx == len(execution_layers) - 1
+            if (
+                settings.orchestrator_dynamic_adjust
+                and is_last_planned_layer
+                and dynamic_adjust_rounds < max_dynamic_rounds
+                and total_appended < max_total_appends
+            ):
                 new_sqs = await self._dynamic_adjust(
                     state, completed_results, execution_layers, layer_idx
                 )
@@ -288,7 +296,9 @@ class OrchestratorAgent(BaseAgent):
         return result
 
     def _topological_sort(
-        self, sub_questions: list[SubQuestion]
+        self,
+        sub_questions: list[SubQuestion],
+        satisfied_dependency_ids: set[str] | None = None,
     ) -> list[list[SubQuestion]]:
         """
         对子问题进行拓扑排序，返回按层级组织的执行计划
@@ -298,6 +308,8 @@ class OrchestratorAgent(BaseAgent):
 
         Args:
             sub_questions: 子问题列表
+            satisfied_dependency_ids: 已在前序阶段完成的依赖 ID。这些依赖
+                不参与本次排序，但应视为已经满足。
 
         Returns:
             按层级组织的子问题列表，外层列表表示执行层级
@@ -306,6 +318,7 @@ class OrchestratorAgent(BaseAgent):
             ValueError: 存在循环依赖
         """
         sq_map = {sq.id: sq for sq in sub_questions}
+        satisfied_dependency_ids = satisfied_dependency_ids or set()
         in_degree: dict[str, int] = defaultdict(int)
         dependents: dict[str, list[str]] = defaultdict(list)
 
@@ -314,6 +327,8 @@ class OrchestratorAgent(BaseAgent):
                 in_degree[sq.id] = 0
             for dep_id in sq.depends_on:
                 if dep_id not in sq_map:
+                    if dep_id in satisfied_dependency_ids:
+                        continue
                     self.log(f"⚠️ 子问题 {sq.id} 依赖的 {dep_id} 不存在，忽略该依赖")
                     continue
                 in_degree[sq.id] += 1
@@ -474,9 +489,10 @@ class OrchestratorAgent(BaseAgent):
 
         try:
             self.log("动态调整：调用 LLM 判断是否需要追加子问题...")
-            response = await self.llm.generate(
+            response = await self.generate(
                 prompt=prompt,
                 system_prompt="你是一个研究调度专家，只输出 JSON。",
+                max_tokens=settings.orchestrator_max_tokens,
             )
 
             adjust_data = self._parse_json_response(response)
@@ -543,7 +559,10 @@ class OrchestratorAgent(BaseAgent):
         remaining_sqs.extend(new_sub_questions)
 
         try:
-            new_layers = self._topological_sort(remaining_sqs)
+            new_layers = self._topological_sort(
+                remaining_sqs,
+                satisfied_dependency_ids=set(completed_results),
+            )
             execution_layers[next_layer_idx:] = new_layers
             self.log(f"  重建执行计划：剩余 {len(new_layers)} 层，"
                      f"共 {len(remaining_sqs)} 个子问题（含 {len(new_sub_questions)} 个追加）")
@@ -602,7 +621,10 @@ class OrchestratorAgent(BaseAgent):
 
         if failed_sqs:
             try:
-                retry_layers = self._topological_sort(failed_sqs)
+                retry_layers = self._topological_sort(
+                    failed_sqs,
+                    satisfied_dependency_ids=set(completed_results),
+                )
             except ValueError:
                 retry_layers = [failed_sqs]
 
@@ -700,17 +722,17 @@ class OrchestratorAgent(BaseAgent):
         original_keywords_zh = "、".join(sub_question.keywords_zh)
         original_keywords_en = ", ".join(sub_question.keywords_en)
 
-        user_prompt = EXTRA_KEYWORDS_USER_PROMPT.format(
-            sub_question=sub_question.question,
-            original_keywords_zh=original_keywords_zh,
-            original_keywords_en=original_keywords_en,
-            critique_feedback=critique_feedback,
-        )
-
         try:
-            response = await self.llm.generate(
+            user_prompt = EXTRA_KEYWORDS_USER_PROMPT.format(
+                sub_question=sub_question.question,
+                original_keywords_zh=original_keywords_zh,
+                original_keywords_en=original_keywords_en,
+                critique_feedback=critique_feedback,
+            )
+            response = await self.generate(
                 prompt=user_prompt,
                 system_prompt=EXTRA_KEYWORDS_SYSTEM_PROMPT,
+                max_tokens=settings.orchestrator_max_tokens,
             )
 
             data = self._parse_json_response(response)
@@ -772,6 +794,7 @@ class OrchestratorAgent(BaseAgent):
         all_search_results = []
         all_paper_results = []
         all_sources = []
+        all_evidence_cards = []
         findings_parts = []
 
         seen_urls = set()
@@ -801,11 +824,14 @@ class OrchestratorAgent(BaseAgent):
                     seen_source_urls.add(url)
                     all_sources.append(src)
 
+            all_evidence_cards.extend(result.evidence_cards)
+
         state["sub_question_results"] = list(completed_results.values())
         state["search_results"] = all_search_results
         state["paper_results"] = all_paper_results
         state["findings"] = "\n\n---\n\n".join(findings_parts)
         state["sources"] = all_sources
+        state["evidence_cards"] = deduplicate_cards(all_evidence_cards)
 
         self.log(f"结果汇总：{len(completed_results)} 个子问题，"
                  f"{len(all_search_results)} 条网页，"

@@ -19,6 +19,7 @@ from prompts.planner_prompt import (
     PLANNER_CLARIFIED_INTENT_SECTION,
 )
 from workflows.state import SubQuestion
+from config import settings
 
 
 class PlannerAgent(BaseAgent):
@@ -78,9 +79,10 @@ class PlannerAgent(BaseAgent):
         )
 
         self.log("正在调用 LLM 生成研究计划...")
-        response = await self.llm.generate(
+        response = await self.generate(
             prompt=user_prompt,
             system_prompt=PLANNER_SYSTEM_PROMPT,
+            max_tokens=settings.planner_max_tokens,
         )
 
         self.log(f"LLM 原始回复长度: {len(response)} 字符")
