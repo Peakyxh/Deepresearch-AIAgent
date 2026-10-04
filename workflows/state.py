@@ -54,6 +54,10 @@ class SubQuestionResult(BaseModel):
     key_insights: list[str] = Field(
         default_factory=list, description="关键洞察"
     )
+    claims: list[dict] = Field(
+        default_factory=list,
+        description="带证据ID、置信度和适用范围的原子化研究结论",
+    )
     information_gaps: list[str] = Field(
         default_factory=list, description="信息缺口"
     )
@@ -124,6 +128,9 @@ class ResearchState(BaseModel):
         default_factory=list, description="论文搜索结果"
     )
     findings: str = Field(default="", description="研究发现汇总")
+    claims: list[dict] = Field(
+        default_factory=list, description="跨子问题汇总后的结构化研究结论"
+    )
     sources: list[dict] = Field(
         default_factory=list,
         description="参考文献来源列表，每项包含 title/url/type/year/authors",
@@ -196,6 +203,10 @@ class ResearchState(BaseModel):
         default_factory=dict, description="结构化报告大纲或原始文本"
     )
     user_outline_feedback: str = Field(default="", description="用户对大纲的修改建议")
+    citation_integrity_issues: list[str] = Field(
+        default_factory=list,
+        description="Writer 生成但无法映射到最终参考文献的无效引用编号",
+    )
 
     # ==================== 流程控制 ====================
     current_step: str = Field(default="planner", description="当前执行阶段")

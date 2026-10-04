@@ -12,6 +12,7 @@ Writer Agent —— 研究报告撰写者
 """
 
 import json
+import re
 from datetime import datetime
 from typing import Any
 
@@ -112,6 +113,13 @@ class WriterAgent(BaseAgent):
                 query, findings, critique, search_text, paper_text
             )
 
+        # Deterministically prevent hallucinated citation numbers from being
+        # presented as valid references. This costs no model tokens.
+        report, citation_issues = self._sanitize_citations(report, sources)
+        state["citation_integrity_issues"] = citation_issues
+        if citation_issues:
+            self.log(f"修正了 {len(citation_issues)} 个无效引用编号")
+
         # 添加报告元信息
         report = self._add_metadata(report, query)
 
@@ -127,6 +135,29 @@ class WriterAgent(BaseAgent):
         self.log(f"研究报告生成完成，长度: {len(report)} 字符")
 
         return state
+
+    @staticmethod
+    def _sanitize_citations(
+        report: str,
+        sources: list[dict],
+    ) -> tuple[str, list[str]]:
+        """Replace citation labels that have no matching final reference."""
+        limits = {
+            "网页": sum(1 for item in sources if item.get("type") == "web"),
+            "论文": sum(1 for item in sources if item.get("type") == "paper"),
+        }
+        issues: list[str] = []
+
+        def replace(match: re.Match[str]) -> str:
+            ref_type = match.group(1)
+            number = int(match.group(2))
+            if 1 <= number <= limits[ref_type]:
+                return match.group(0)
+            issues.append(match.group(0))
+            return "（引用编号无效，需进一步验证）"
+
+        sanitized = re.sub(r"\[(网页|论文)(\d+)\]", replace, report)
+        return sanitized, issues
 
     async def _compress_if_needed(
         self, findings: str, search_text: str, paper_text: str

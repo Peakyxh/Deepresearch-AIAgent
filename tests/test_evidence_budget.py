@@ -6,6 +6,8 @@ from workflows.evidence import (
     build_evidence_cards,
     deduplicate_cards,
     format_evidence_catalog,
+    format_claims,
+    normalize_claims,
     select_paper_evidence,
     select_web_evidence,
     summarize_evidence_coverage,
@@ -82,3 +84,85 @@ def test_evidence_cards_are_compact_deduplicated_and_citable() -> None:
     assert "[网页1]" in web_text
     assert "[论文1]" in paper_text
     assert "各子问题证据数" in summarize_evidence_coverage(cards)
+
+
+def test_explicit_year_range_excludes_out_of_scope_papers() -> None:
+    papers = [
+        PaperResult(
+            title=f"Pupil segmentation {year}",
+            url=f"https://arxiv.org/abs/{year}",
+            abstract="pupil segmentation benchmark",
+            year=year,
+        )
+        for year in (2019, 2023, 2026)
+    ]
+
+    selected = select_paper_evidence(
+        papers, "2020-2025 pupil segmentation progress", limit=5
+    )
+
+    assert [paper.year for paper in selected] == [2023]
+
+
+def test_paper_selection_rejects_generic_but_off_topic_match() -> None:
+    papers = [
+        PaperResult(
+            title="Robust pupil segmentation for eye tracking",
+            url="https://arxiv.org/abs/pupil",
+            abstract="A pupil and gaze segmentation benchmark.",
+            year=2024,
+        ),
+        PaperResult(
+            title="Efficient brain tumor segmentation",
+            url="https://arxiv.org/abs/tumor",
+            abstract="A deep learning medical image segmentation benchmark.",
+            year=2024,
+        ),
+    ]
+
+    selected = select_paper_evidence(
+        papers, "pupil segmentation eye tracking", limit=5
+    )
+
+    assert [paper.url for paper in selected] == ["https://arxiv.org/abs/pupil"]
+
+
+def test_claims_keep_only_real_evidence_ids_and_final_citations() -> None:
+    cards = build_evidence_cards(
+        [
+            SearchResult(
+                title="Official report",
+                url="https://example.gov/report",
+                content="verified finding",
+                score=0.9,
+            )
+        ],
+        [],
+        "sq_1",
+        excerpt_chars=120,
+    )
+    valid_id = cards[0]["source_id"]
+
+    claims = normalize_claims(
+        [
+            {
+                "claim": "A supported claim",
+                "source_ids": [valid_id, "src_invented"],
+                "confidence": "high",
+                "scope": "2025",
+            },
+            {
+                "claim": "An unsupported claim",
+                "source_ids": ["src_invented"],
+                "confidence": "high",
+            },
+        ],
+        cards,
+    )
+
+    assert claims[0]["source_ids"] == [valid_id]
+    assert claims[1]["source_ids"] == []
+    assert claims[1]["confidence"] == "low"
+    rendered = format_claims(claims, cards)
+    assert "[网页1]" in rendered
+    assert "需进一步验证" in rendered

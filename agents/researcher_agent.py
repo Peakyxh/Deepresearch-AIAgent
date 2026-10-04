@@ -24,6 +24,8 @@ from config import settings
 from memory.context_manager import ContextManager
 from workflows.evidence import (
     build_evidence_cards,
+    format_claims,
+    normalize_claims,
     select_paper_evidence,
     select_web_evidence,
 )
@@ -215,8 +217,12 @@ class ResearcherAgent(BaseAgent):
         self.log(f"收集了 {len(sources)} 条参考文献来源")
 
         # 格式化搜索结果为文本，供 LLM 整合
-        search_text = self._format_search_results(filtered_search_results)
-        paper_text = self._format_paper_results(filtered_paper_results)
+        search_text = self._format_search_results(
+            filtered_search_results, state["evidence_cards"]
+        )
+        paper_text = self._format_paper_results(
+            filtered_paper_results, state["evidence_cards"]
+        )
 
         # ==================== 语义压缩 ====================
         # 如果格式化后的搜索结果 + 论文结果过长，进行语义压缩
@@ -286,7 +292,24 @@ class ResearcherAgent(BaseAgent):
         findings_data = self._parse_json_response(response)
 
         if findings_data:
-            state["findings"] = findings_data.get("findings", "")
+            state["claims"] = normalize_claims(
+                findings_data.get("claims", []), state["evidence_cards"]
+            )
+            summary = findings_data.get("findings", "")
+            claim_text = format_claims(state["claims"], state["evidence_cards"])
+            state["findings"] = (
+                f"{summary}\n\n结构化结论：\n{claim_text}"
+                if claim_text else summary
+            ).strip()
+            information_gaps = [
+                str(item).strip()
+                for item in findings_data.get("information_gaps", [])[:3]
+                if str(item).strip()
+            ]
+            if information_gaps:
+                state["findings"] += "\n\n未解决的信息缺口：\n" + "\n".join(
+                    f"- {item}" for item in information_gaps
+                )
             self.log(f"研究发现: {state['findings'][:100]}...")
         else:
             # JSON 解析失败，直接使用原始回复
@@ -298,7 +321,11 @@ class ResearcherAgent(BaseAgent):
         state["use_orchestrator"] = False
         return state
 
-    def _format_search_results(self, results: list[SearchResult]) -> str:
+    def _format_search_results(
+        self,
+        results: list[SearchResult],
+        evidence_cards: list[dict] | None = None,
+    ) -> str:
         """
         将搜索结果格式化为文本
 
@@ -312,8 +339,13 @@ class ResearcherAgent(BaseAgent):
             return "（无网页搜索结果）"
 
         formatted = []
+        id_by_url = {
+            card.get("url", ""): card.get("source_id", "")
+            for card in (evidence_cards or [])
+        }
         for i, r in enumerate(results, 1):
             text = f"[网页{i}] 标题: {r.title}\n"
+            text += f"       证据ID: {id_by_url.get(r.url, '')}\n"
             text += f"       链接: {r.url}\n"
             text += f"       内容: {r.content}\n"
             text += f"       来源: {r.source} | 评分: {r.score:.2f}"
@@ -321,7 +353,11 @@ class ResearcherAgent(BaseAgent):
 
         return "\n\n".join(formatted)
 
-    def _format_paper_results(self, papers: list[PaperResult]) -> str:
+    def _format_paper_results(
+        self,
+        papers: list[PaperResult],
+        evidence_cards: list[dict] | None = None,
+    ) -> str:
         """
         将论文搜索结果格式化为文本
 
@@ -335,8 +371,13 @@ class ResearcherAgent(BaseAgent):
             return "（无论文搜索结果）"
 
         formatted = []
+        id_by_url = {
+            card.get("url", ""): card.get("source_id", "")
+            for card in (evidence_cards or [])
+        }
         for i, p in enumerate(papers, 1):
             text = f"[论文{i}] 标题: {p.title}\n"
+            text += f"       证据ID: {id_by_url.get(p.url, '')}\n"
             text += f"       作者: {', '.join(p.authors[:3])}{'等' if len(p.authors) > 3 else ''}\n"
             text += f"       年份: {p.year or '未知'}\n"
             text += f"       链接: {p.url}\n"

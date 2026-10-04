@@ -18,7 +18,15 @@ RESEARCHER_SYSTEM_PROMPT = UNTRUSTED_CONTENT_POLICY + """你是一个专业的�
 你的输出必须严格遵循以下 JSON 格式，不要输出任何其他内容：
 
 {
-    "findings": "基于搜索结果的综合研究发现，详细、有条理地总结",
+    "findings": "不超过300字的综合摘要，只概括下方 claims 中已有的内容",
+    "claims": [
+        {
+            "claim": "一个可独立核验的具体结论",
+            "source_ids": ["src_证据ID1", "src_证据ID2"],
+            "confidence": "high|medium|low",
+            "scope": "该结论适用的数据集、时间、地区或其他条件；无则留空"
+        }
+    ],
     "key_insights": [
         "关键洞察1",
         "关键洞察2",
@@ -35,7 +43,12 @@ RESEARCHER_SYSTEM_PROMPT = UNTRUSTED_CONTENT_POLICY + """你是一个专业的�
 - 只基于搜索结果中的信息进行总结，不要编造内容
 - 如果搜索结果之间有矛盾，明确指出
 - 如果搜索结果不足以回答问题，在 information_gaps 中说明
-- 每个论点都要标注来源
+- claims 最多6条，每条只表达一个可独立核验的结论
+- 每条 claim 必须使用搜索结果中真实存在的证据ID；禁止虚构证据ID
+- 数字、年份、性能比较和因果判断必须有 source_ids，并在 scope 中写明适用条件
+- high 仅用于直接原始来源或至少两个独立可靠来源；单一来源通常为 medium；间接类比或无来源为 low
+- 不同数据集、任务或指标的数据不得直接写成“更优/领先”，只能并列陈述并说明不可直接比较
+- 邻近领域材料只能作为方法参考，不得写成当前研究对象已经验证的直接证据
 - 只输出 JSON，不要输出任何解释性文字
 """
 

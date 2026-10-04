@@ -29,7 +29,7 @@ from search.search_factory import SearchFactory
 from academic.academic_factory import AcademicFactory
 from config import settings
 from workflows.state import SubQuestion, SubQuestionResult
-from workflows.evidence import deduplicate_cards
+from workflows.evidence import deduplicate_cards, format_claims
 
 
 ORCHESTRATOR_ADJUST_PROMPT = """你是一个研究调度专家。根据以下已完成子问题的研究结果，判断是否需要追加新的子问题。
@@ -795,16 +795,14 @@ class OrchestratorAgent(BaseAgent):
         all_paper_results = []
         all_sources = []
         all_evidence_cards = []
-        findings_parts = []
+        all_claims = []
 
         seen_urls = set()
         seen_paper_urls = set()
         seen_source_urls = set()
 
         for sq_id, result in completed_results.items():
-            findings_parts.append(
-                f"## 子问题: {result.sub_question}\n\n{result.findings}"
-            )
+            all_claims.extend(result.claims)
 
             for sr in result.search_results:
                 url = sr.get("url", "")
@@ -826,12 +824,30 @@ class OrchestratorAgent(BaseAgent):
 
             all_evidence_cards.extend(result.evidence_cards)
 
+        merged_cards = deduplicate_cards(all_evidence_cards)
+        findings_parts = []
+        for result in completed_results.values():
+            if result.claims:
+                claim_text = format_claims(result.claims, merged_cards)
+                summary = result.findings.split("\n\n结构化结论：", 1)[0].strip()
+                content = f"{summary}\n\n结构化结论：\n{claim_text}".strip()
+            else:
+                content = result.findings
+            if result.information_gaps and "未解决的信息缺口：" not in content:
+                content += "\n\n未解决的信息缺口：\n" + "\n".join(
+                    f"- {item}" for item in result.information_gaps[:3]
+                )
+            findings_parts.append(
+                f"## 子问题: {result.sub_question}\n\n{content}"
+            )
+
         state["sub_question_results"] = list(completed_results.values())
         state["search_results"] = all_search_results
         state["paper_results"] = all_paper_results
         state["findings"] = "\n\n---\n\n".join(findings_parts)
+        state["claims"] = all_claims
         state["sources"] = all_sources
-        state["evidence_cards"] = deduplicate_cards(all_evidence_cards)
+        state["evidence_cards"] = merged_cards
 
         self.log(f"结果汇总：{len(completed_results)} 个子问题，"
                  f"{len(all_search_results)} 条网页，"
