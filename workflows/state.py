@@ -84,6 +84,10 @@ class ResearchState(BaseModel):
     clarification_qa: list[dict] = Field(
         default_factory=list, description="澄清问答对，每项包含 question/answer"
     )
+    clarification_round: int = Field(default=0, description="已完成的澄清轮次")
+    pending_clarification_questions: list[dict] = Field(
+        default_factory=list, description="等待用户回答的澄清问题"
+    )
 
     # ==================== 会话与历史 ====================
     session_id: str = Field(default="", description="会话ID，用于记忆隔离")
@@ -187,6 +191,10 @@ class ResearchState(BaseModel):
     # ==================== Writer 输出 ====================
     report: str = Field(default="", description="最终研究报告")
     report_outline: str = Field(default="", description="报告大纲（两轮写作第一轮生成）")
+    report_outline_display: str = Field(default="", description="供界面展示的格式化报告大纲")
+    report_outline_payload: dict | str = Field(
+        default_factory=dict, description="结构化报告大纲或原始文本"
+    )
     user_outline_feedback: str = Field(default="", description="用户对大纲的修改建议")
 
     # ==================== 流程控制 ====================

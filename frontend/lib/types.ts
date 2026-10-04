@@ -32,8 +32,18 @@ export interface Interaction {
     round?: number;
     questions?: Array<{ question: string; options?: string[] }>;
     outline?: string;
-    outline_json?: unknown;
+    outline_json?: ReportOutline | string;
   };
+}
+
+export interface ReportOutline {
+  title?: string;
+  summary_points?: string[];
+  sections?: Array<{
+    heading?: string;
+    key_arguments?: string[];
+  }>;
+  conclusion_points?: string[];
 }
 
 export interface ResearchSource {

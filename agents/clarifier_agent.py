@@ -62,18 +62,27 @@ class ClarifierAgent(BaseAgent):
 
         self.log(f"开始分析用户意图：{query}")
 
-        clarification_qa = []
+        clarification_qa = list(state.get("clarification_qa", []))
+        start_round = int(state.get("clarification_round", 0) or 0) + 1
 
-        for round_num in range(1, self.max_rounds + 1):
+        for round_num in range(start_round, self.max_rounds + 1):
             self.log(f"澄清交互第 {round_num}/{self.max_rounds} 轮")
 
-            questions = await self._generate_clarification_questions(query, clarification_qa)
+            questions = state.get("pending_clarification_questions", [])
+            if not questions:
+                questions = await self._generate_clarification_questions(
+                    query, clarification_qa
+                )
+                state["pending_clarification_questions"] = questions
+                state["clarification_round"] = round_num - 1
 
             if not questions:
                 self.log("问题已足够清晰，无需进一步澄清")
                 break
 
             round_answers = await self._interact_with_user(questions, round_num)
+            state["pending_clarification_questions"] = []
+            state["clarification_round"] = round_num
 
             if round_answers is None:
                 self.log("用户跳过所有澄清问题")
@@ -94,6 +103,7 @@ class ClarifierAgent(BaseAgent):
 
         state["clarified_intent"] = clarified_intent
         state["clarification_qa"] = clarification_qa
+        state["pending_clarification_questions"] = []
         state["current_step"] = "planner"
 
         return state

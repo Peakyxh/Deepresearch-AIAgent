@@ -35,6 +35,7 @@ from memory.memory_manager import MemoryManager
 from memory.vector_store import VectorStore
 from workflows.dag_engine import END, Workflow
 from workflows.state import ResearchState
+from workflows.interrupts import WorkflowPaused
 
 logger = logging.getLogger(__name__)
 
@@ -557,27 +558,16 @@ class ResearchWorkflow:
             self.logger.info("🔀 路由: Critic → Orchestrator（审查未通过，重试）")
             return "orchestrator"
 
-    async def run(self, query: str) -> ResearchState:
-        """
-        执行完整研究工作流
-
-        Args:
-            query: 用户研究问题
-
-        Returns:
-            最终的研究状态（包含报告）
-        """
-        self.logger.info(f"🔬 开始深度研究: {query}")
-        self._reset_token_usage()
-
-        # 会话隔离：清空上一轮研究遗留的上下文与关键信息，避免跨问题串味
-        self.context_manager.clear()
-
-        initial_state = {
+    @staticmethod
+    def initial_state(query: str, session_id: str) -> dict[str, Any]:
+        """Build the serializable state used by both CLI and durable workers."""
+        return {
             "query": query,
-            "session_id": self.session_id,
+            "session_id": session_id,
             "clarified_intent": "",
             "clarification_qa": [],
+            "clarification_round": 0,
+            "pending_clarification_questions": [],
             "history_context": "",
             "sub_questions": [],
             "structured_sub_questions": [],
@@ -609,13 +599,111 @@ class ResearchWorkflow:
             "missing_research_topics": [],
             "report": "",
             "report_outline": "",
+            "report_outline_display": "",
+            "report_outline_payload": {},
             "user_outline_feedback": "",
-            "current_step": "planner",
+            "current_step": "clarifier",
             "retry_count": 0,
             "max_retries": settings.critique_max_retries,
             "use_orchestrator": settings.orchestrator_enabled,
             "error": "",
         }
+
+    def restore_context(self, state: dict[str, Any]) -> None:
+        """Rebuild ephemeral prompt context from a durable state snapshot."""
+        self.context_manager.clear()
+        clarified_intent = state.get("clarified_intent", "")
+        if clarified_intent:
+            self.context_manager.add_context(
+                role="system",
+                content=f"意图澄清: {clarified_intent}",
+                is_key=True,
+                query=state.get("query", ""),
+            )
+        research_plan = state.get("research_plan", "")
+        if research_plan:
+            self.context_manager.add_context(
+                role="system",
+                content=f"研究计划: {research_plan}",
+                is_key=True,
+                query=state.get("query", ""),
+            )
+        findings = state.get("findings", "")
+        if findings:
+            self.context_manager.add_context(
+                role="system",
+                content=f"研究发现: {findings}",
+                is_key=False,
+                query=state.get("query", ""),
+            )
+
+    async def execute_phase(
+        self, state: dict[str, Any], phase: str
+    ) -> tuple[dict[str, Any], str | None]:
+        """Execute exactly one durable phase and return its successor."""
+        nodes = {
+            "clarifier": self._clarifier_node,
+            "planner": self._planner_node,
+            "orchestrator": self._orchestrator_node,
+            "critic": self._critic_node,
+            "writer": self._writer_node,
+        }
+        if phase not in nodes:
+            raise ValueError(f"unknown workflow phase: {phase}")
+        self.restore_context(state)
+        self._reset_token_usage()
+        state["current_step"] = phase
+        state = await nodes[phase](state)
+
+        usage = self._collect_token_usage()
+        previous_usage = state.get("token_usage", {}) or {}
+        by_agent = {
+            name: dict(values)
+            for name, values in previous_usage.get("by_agent", {}).items()
+        }
+        for name, values in usage["by_agent"].items():
+            bucket = by_agent.setdefault(
+                name, {"calls": 0, "input_tokens": 0, "output_tokens": 0}
+            )
+            for key in ("calls", "input_tokens", "output_tokens"):
+                bucket[key] = int(bucket.get(key, 0)) + int(values.get(key, 0))
+        state["token_usage"] = {
+            "estimated": True,
+            "total_calls": int(previous_usage.get("total_calls", 0)) + usage["total_calls"],
+            "input_tokens": int(previous_usage.get("input_tokens", 0)) + usage["input_tokens"],
+            "output_tokens": int(previous_usage.get("output_tokens", 0)) + usage["output_tokens"],
+            "by_agent": by_agent,
+        }
+
+        if phase == "critic":
+            next_phase = self._route_after_critic(state)
+        else:
+            next_phase = {
+                "clarifier": "planner",
+                "planner": "orchestrator",
+                "orchestrator": "critic",
+                "writer": None,
+            }[phase]
+        state["current_step"] = next_phase or "completed"
+        return state, next_phase
+
+    async def run(self, query: str) -> ResearchState:
+        """
+        执行完整研究工作流
+
+        Args:
+            query: 用户研究问题
+
+        Returns:
+            最终的研究状态（包含报告）
+        """
+        self.logger.info(f"🔬 开始深度研究: {query}")
+        self._reset_token_usage()
+
+        # 会话隔离：清空上一轮研究遗留的上下文与关键信息，避免跨问题串味
+        self.context_manager.clear()
+
+        initial_state = self.initial_state(query, self.session_id)
 
         try:
             final_state = await self.workflow.run(initial_state)
@@ -624,6 +712,8 @@ class ResearchWorkflow:
             result = ResearchState(**final_state)
             return result
 
+        except WorkflowPaused:
+            raise
         except Exception as e:
             self.logger.error(f"工作流执行失败: {e}")
             return ResearchState(

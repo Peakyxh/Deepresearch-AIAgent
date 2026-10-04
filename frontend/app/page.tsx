@@ -31,6 +31,7 @@ import { API_BASE, api } from "@/lib/api";
 import type {
   Interaction,
   ResearchSource,
+  ReportOutline,
   RunDetail,
   RunEvent,
   RunStatus,
@@ -450,6 +451,10 @@ function InteractionCard({ interaction, answers, feedback, submitting, onAnswer,
   const currentQuestion = questions[questionIndex];
   const currentAnswer = answers[questionIndex] || "";
   const isLastQuestion = questionIndex >= questions.length - 1;
+  const reportOutline = useMemo(
+    () => parseReportOutline(interaction.payload.outline_json),
+    [interaction.payload.outline_json],
+  );
 
   return (
     <section className="interaction-card">
@@ -489,7 +494,14 @@ function InteractionCard({ interaction, answers, feedback, submitting, onAnswer,
           </div>
         ) : <p className="empty-copy">没有需要回答的问题，可以直接继续。</p>
       ) : (
-        <div className="outline-review"><pre>{interaction.payload.outline || "大纲已生成"}</pre><label><span>修改意见（没有意见可直接确认）</span><textarea rows={3} value={feedback} onChange={(event) => onFeedback(event.target.value)} placeholder="例如：增加技术风险章节，压缩市场背景…" /></label></div>
+        <div className="outline-review">
+          {reportOutline ? (
+            <ReportOutlineView outline={reportOutline} />
+          ) : (
+            <pre>{interaction.payload.outline || "大纲已生成"}</pre>
+          )}
+          <label><span>修改意见（没有意见可直接确认）</span><textarea rows={3} value={feedback} onChange={(event) => onFeedback(event.target.value)} placeholder="例如：增加技术风险章节，压缩市场背景…" /></label>
+        </div>
       )}
       <div className="interaction-actions">
         {interaction.kind === "clarification" && questionIndex > 0 ? (
@@ -502,6 +514,82 @@ function InteractionCard({ interaction, answers, feedback, submitting, onAnswer,
         )}
       </div>
     </section>
+  );
+}
+
+function parseReportOutline(value: unknown): ReportOutline | null {
+  let candidate = value;
+  if (typeof candidate === "string") {
+    const fenced = candidate.match(/```(?:json)?\s*([\s\S]*?)```/i);
+    const text = (fenced?.[1] || candidate).trim();
+    try {
+      candidate = JSON.parse(text);
+    } catch {
+      const start = text.indexOf("{");
+      const end = text.lastIndexOf("}");
+      if (start < 0 || end <= start) return null;
+      try {
+        candidate = JSON.parse(text.slice(start, end + 1));
+      } catch {
+        return null;
+      }
+    }
+  }
+  if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return null;
+  const raw = candidate as Record<string, unknown>;
+  const stringList = (item: unknown) => Array.isArray(item)
+    ? item.filter((entry): entry is string => typeof entry === "string" && Boolean(entry.trim()))
+    : [];
+  const sections = Array.isArray(raw.sections)
+    ? raw.sections.flatMap((item) => {
+      if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+      const section = item as Record<string, unknown>;
+      return [{
+        heading: typeof section.heading === "string" ? section.heading : "",
+        key_arguments: stringList(section.key_arguments),
+      }];
+    })
+    : [];
+  const outline: ReportOutline = {
+    title: typeof raw.title === "string" ? raw.title : "",
+    summary_points: stringList(raw.summary_points),
+    sections,
+    conclusion_points: stringList(raw.conclusion_points),
+  };
+  const hasContent = Boolean(
+    outline.title
+      || outline.summary_points?.length
+      || outline.sections?.length
+      || outline.conclusion_points?.length,
+  );
+  return hasContent ? outline : null;
+}
+
+function ReportOutlineView({ outline }: { outline: ReportOutline }) {
+  return (
+    <article className="outline-document">
+      <header>
+        <span>REPORT OUTLINE</span>
+        <h3>{outline.title || "研究报告大纲"}</h3>
+      </header>
+      {outline.summary_points?.length ? (
+        <section><h4>摘要要点</h4><ul>{outline.summary_points.map((point, index) => <li key={`${point}-${index}`}>{point}</li>)}</ul></section>
+      ) : null}
+      {outline.sections?.length ? (
+        <section className="outline-sections">
+          <h4>章节结构</h4>
+          <ol>{outline.sections.map((section, index) => (
+            <li key={`${section.heading || "section"}-${index}`}>
+              <span>{String(index + 1).padStart(2, "0")}</span>
+              <div><h5>{section.heading || `第 ${index + 1} 章`}</h5>{section.key_arguments?.length ? <ul>{section.key_arguments.map((argument, argumentIndex) => <li key={`${argument}-${argumentIndex}`}>{argument}</li>)}</ul> : <p>本章节论点待补充</p>}</div>
+            </li>
+          ))}</ol>
+        </section>
+      ) : null}
+      {outline.conclusion_points?.length ? (
+        <section><h4>预期结论</h4><ul>{outline.conclusion_points.map((point, index) => <li key={`${point}-${index}`}>{point}</li>)}</ul></section>
+      ) : null}
+    </article>
   );
 }
 

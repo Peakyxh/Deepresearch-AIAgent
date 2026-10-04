@@ -1,5 +1,6 @@
 import json
 import os
+from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
 
 from fastapi import FastAPI, Header, HTTPException, Query, status
@@ -22,10 +23,20 @@ def _allowed_origins() -> list[str]:
     return ["http://localhost:3000", "http://127.0.0.1:3000"]
 
 
+@asynccontextmanager
+async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    await run_manager.initialize()
+    try:
+        yield
+    finally:
+        await run_manager.close()
+
+
 app = FastAPI(
     title="DeepResearch Agent API",
     version="0.2.0",
     description="Task, event streaming, and human-in-the-loop API for DeepResearch Agent.",
+    lifespan=lifespan,
 )
 app.add_middleware(
     CORSMiddleware,
@@ -49,13 +60,13 @@ async def create_run(request: CreateRunRequest) -> dict:
 
 @app.get("/api/runs", response_model=list[RunSummary])
 async def list_runs() -> list[dict]:
-    return [run_manager.summary(record) for record in run_manager.list_runs()]
+    return [run_manager.summary(record) for record in await run_manager.list_runs_async()]
 
 
 @app.get("/api/runs/{run_id}", response_model=RunDetail)
 async def get_run(run_id: str) -> dict:
     try:
-        return run_manager.detail(run_manager.require(run_id))
+        return run_manager.detail(await run_manager.get_run(run_id))
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="run not found") from exc
 
@@ -67,7 +78,7 @@ async def stream_run_events(
     last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
 ) -> StreamingResponse:
     try:
-        run_manager.require(run_id)
+        await run_manager.get_run(run_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="run not found") from exc
 

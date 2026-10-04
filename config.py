@@ -93,6 +93,20 @@ class Settings(BaseSettings):
 
     # ==================== Memory 配置 ====================
 
+    # PostgreSQL API state persistence. Leave empty for the legacy in-memory mode.
+    database_url: str = ""
+    database_echo: bool = False
+    database_auto_create: bool = True
+    database_recover_interrupted_runs: bool = True
+
+    # ==================== Worker / Redis 配置 ====================
+
+    task_execution_mode: Literal["inline", "worker"] = "inline"
+    redis_url: str = ""
+    redis_stream_name: str = "deepresearch:runs"
+    redis_consumer_group: str = "research-workers"
+    worker_lease_seconds: int = 120
+
     # ChromaDB 持久化目录
     chroma_persist_dir: str = "./chroma_data"
 

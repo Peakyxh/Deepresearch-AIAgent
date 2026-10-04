@@ -335,9 +335,52 @@ npm run dev
 `frontend/.env.local.example` 为 `frontend/.env.local` 并修改
 `NEXT_PUBLIC_API_BASE_URL`。
 
-当前任务状态保存在 API 进程内存中：澄清问题和报告大纲出现时，工作流会暂停，
-前端提交回答后从原协程继续；重启 API 会清空任务。生产部署可在保持事件契约不变的
-前提下，将 `RunManager` 替换为 PostgreSQL/Redis 持久化实现。
+API 支持将任务、事件和人机交互持久化到 PostgreSQL。未配置 `DATABASE_URL` 时仍使用
+进程内存，方便离线开发；线上环境应启用 PostgreSQL：
+
+```bash
+# 启动本地 PostgreSQL
+docker compose up -d postgres
+```
+
+```ini
+DATABASE_URL=postgresql+asyncpg://deepresearch:deepresearch-local@localhost:5432/deepresearch
+DATABASE_AUTO_CREATE=true
+```
+
+开发环境会在 API 启动时自动建表。生产环境建议先执行
+`migrations/001_create_research_state.sql`，然后设置 `DATABASE_AUTO_CREATE=false`。
+API 启动时会从数据库恢复历史任务、事件和交互。默认的
+`TASK_EXECUTION_MODE=inline` 保留单进程开发方式。要启用独立 Worker，先启动
+PostgreSQL 与 Redis：
+
+```bash
+docker compose up -d postgres redis
+```
+
+如果数据库已经使用过旧版本，先执行 `migrations/002_add_worker_checkpoints.sql`。
+开发环境设置 `DATABASE_AUTO_CREATE=true` 时，API 也会自动补齐 Worker 字段和检查点表。
+
+```ini
+TASK_EXECUTION_MODE=worker
+REDIS_URL=redis://localhost:6379/0
+```
+
+然后分别启动 API 和 Worker：
+
+```bash
+# 终端 1：API 仅负责请求、PostgreSQL 状态和 SSE
+uvicorn api.main:app --reload --port 8000
+
+# 终端 2：执行研究阶段
+python -m worker.main
+```
+
+Redis 6.2+ 使用 Streams consumer group；旧版 Redis（包括 Windows Redis 3.0）会自动
+降级为可靠 List + processing 列表 + 租约恢复。Worker 在 Clarifier、Planner、Research、
+Critic、Writer 每个阶段完成后写入 `run_checkpoints`。澄清问题和大纲审核会持久化后释放 Worker；用户
+提交回答时任务重新进入 Redis，并从相同阶段继续。Worker 崩溃后，其他 Worker 会在
+租约过期后接管 Redis pending 消息，并从最近一次 PostgreSQL 检查点恢复。
 
 ### 6. 使用命令行模式（可选）
 

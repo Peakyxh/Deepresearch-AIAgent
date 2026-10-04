@@ -15,6 +15,8 @@ import json
 from datetime import datetime
 from typing import Any
 
+from json_repair import loads as repair_json_loads
+
 from agents.base_agent import BaseAgent
 from config import settings
 from llm.base_llm import BaseLLM
@@ -191,37 +193,54 @@ class WriterAgent(BaseAgent):
         if context_prefix:
             self.log("已注入上游关键背景（意图澄清/研究计划）")
 
-        outline_prompt = context_prefix + WRITER_OUTLINE_USER_PROMPT.format(
-            query=query,
-            findings=findings,
-            critique=critique if critique else "无审查反馈",
-        )
-
-        outline_response = await self.generate(
-            prompt=outline_prompt,
-            system_prompt=WRITER_OUTLINE_SYSTEM_PROMPT,
-            max_tokens=settings.writer_outline_max_tokens,
-        )
-
-        outline_data = self._parse_json_response(outline_response)
-
-        if outline_data:
-            # 格式化大纲展示给用户
-            outline_display = self._format_outline_for_display(outline_data)
-            outline_text = json.dumps(outline_data, ensure_ascii=False, indent=2)
-            self.log("大纲生成完成")
+        saved_outline = state.get("report_outline", "")
+        if saved_outline:
+            outline_text = str(saved_outline)
+            outline_data = self._parse_json_response(outline_text)
+            outline_display = str(
+                state.get("report_outline_display", "")
+                or (
+                    self._format_outline_for_display(outline_data)
+                    if outline_data
+                    else outline_text
+                )
+            )
+            outline_payload = state.get("report_outline_payload") or outline_data or outline_text
+            self.log("从检查点恢复已生成的报告大纲")
         else:
-            # JSON 解析失败，使用原始文本作为大纲
-            self.log("⚠️ 大纲 JSON 解析失败，使用原始文本")
-            outline_display = outline_response
-            outline_text = outline_response
+            outline_prompt = context_prefix + WRITER_OUTLINE_USER_PROMPT.format(
+                query=query,
+                findings=findings,
+                critique=critique if critique else "无审查反馈",
+            )
+
+            outline_response = await self.generate(
+                prompt=outline_prompt,
+                system_prompt=WRITER_OUTLINE_SYSTEM_PROMPT,
+                max_tokens=settings.writer_outline_max_tokens,
+            )
+
+            outline_data = self._parse_json_response(outline_response)
+
+            if outline_data:
+                outline_display = self._format_outline_for_display(outline_data)
+                outline_text = json.dumps(outline_data, ensure_ascii=False, indent=2)
+                outline_payload = outline_data
+                self.log("大纲生成完成")
+            else:
+                self.log("⚠️ 大纲 JSON 解析失败，使用原始文本")
+                outline_display = outline_response
+                outline_text = outline_response
+                outline_payload = outline_response
 
         # 保存大纲到状态
         state["report_outline"] = outline_text
+        state["report_outline_display"] = outline_display
+        state["report_outline_payload"] = outline_payload
 
         # ==================== 用户交互：审核大纲 ====================
         user_feedback = await self._interact_with_user_on_outline(
-            outline_display, outline_text
+            outline_display, outline_payload
         )
 
         # 保存用户反馈到状态
@@ -319,7 +338,7 @@ class WriterAgent(BaseAgent):
         return "\n".join(lines)
 
     async def _interact_with_user_on_outline(
-        self, outline_display: str, outline_text: str
+        self, outline_display: str, outline_json: dict[str, Any] | str
     ) -> str:
         """
         展示大纲给用户，获取修改建议
@@ -335,7 +354,7 @@ class WriterAgent(BaseAgent):
                 kind="outline_review",
                 payload={
                     "outline": outline_display,
-                    "outline_json": outline_text,
+                    "outline_json": outline_json,
                 },
             )
             if isinstance(response, dict):
@@ -493,13 +512,19 @@ class WriterAgent(BaseAgent):
                 text = text[start:end].strip()
 
         try:
-            return json.loads(text)
+            parsed = json.loads(text)
+            return parsed if isinstance(parsed, dict) else None
         except json.JSONDecodeError:
             start = text.find("{")
             end = text.rfind("}")
             if start != -1 and end > start:
                 try:
-                    return json.loads(text[start : end + 1])
+                    parsed = json.loads(text[start : end + 1])
+                    return parsed if isinstance(parsed, dict) else None
                 except json.JSONDecodeError:
-                    return None
-            return None
+                    pass
+            try:
+                repaired = repair_json_loads(text)
+                return repaired if isinstance(repaired, dict) else None
+            except (ValueError, TypeError, json.JSONDecodeError):
+                return None
