@@ -56,6 +56,7 @@ class ClarifierAgent(BaseAgent):
         if not self.enabled:
             self.log("Clarifier 已禁用，跳过意图澄清")
             state["clarified_intent"] = ""
+            state["intent_profile"] = self._default_intent_profile(query)
             state["clarification_qa"] = []
             state["current_step"] = "planner"
             return state
@@ -93,15 +94,18 @@ class ClarifierAgent(BaseAgent):
             if self._should_stop_clarifying(clarification_qa):
                 break
 
+        intent_profile = self._default_intent_profile(query)
         clarified_intent = ""
         if clarification_qa:
             self.log("正在总结结构化意图描述...")
-            clarified_intent = await self._summarize_intent(query, clarification_qa)
+            intent_profile = await self._summarize_intent(query, clarification_qa)
+            clarified_intent = self._render_intent_profile(intent_profile)
             self.log(f"意图描述: {clarified_intent[:100]}...")
         else:
             self.log("未收集到澄清信息，将使用原始问题进行规划")
 
         state["clarified_intent"] = clarified_intent
+        state["intent_profile"] = intent_profile
         state["clarification_qa"] = clarification_qa
         state["pending_clarification_questions"] = []
         state["current_step"] = "planner"
@@ -234,7 +238,7 @@ class ClarifierAgent(BaseAgent):
 
     async def _summarize_intent(
         self, query: str, clarification_qa: list[dict]
-    ) -> str:
+    ) -> dict[str, Any]:
         """
         根据用户回答总结结构化意图描述
 
@@ -243,7 +247,7 @@ class ClarifierAgent(BaseAgent):
             clarification_qa: 澄清问答对
 
         Returns:
-            结构化意图描述文本
+            结构化意图档案。解析失败时由原始问题和用户回答构造保守档案。
         """
         qa_lines = []
         for qa in clarification_qa:
@@ -261,7 +265,70 @@ class ClarifierAgent(BaseAgent):
             max_tokens=settings.clarifier_max_tokens,
         )
 
-        return response.strip()
+        parsed = self._parse_json_response(response)
+        if not isinstance(parsed, dict):
+            self.log("⚠️ 意图档案解析失败，使用原始问题与澄清原话构造档案")
+            return self._default_intent_profile(query, clarification_qa)
+
+        return self._normalize_intent_profile(parsed, query, clarification_qa)
+
+    @staticmethod
+    def _default_intent_profile(
+        query: str, clarification_qa: list[dict] | None = None
+    ) -> dict[str, Any]:
+        """构造不添加模型推断的保守意图档案。"""
+        requirements = []
+        for qa in clarification_qa or []:
+            question = str(qa.get("question", "")).strip()
+            answer = str(qa.get("answer", "")).strip()
+            if question and answer:
+                requirements.append(f"{question}：{answer}")
+        return {
+            "original_goal": query.strip(),
+            "explicit_requirements": requirements,
+            "assumptions": [],
+            "unresolved_items": [],
+        }
+
+    @classmethod
+    def _normalize_intent_profile(
+        cls,
+        profile: dict[str, Any],
+        query: str,
+        clarification_qa: list[dict],
+    ) -> dict[str, Any]:
+        """限制意图档案字段和类型，避免自由文本继续向下游扩散。"""
+
+        def string_list(value: Any) -> list[str]:
+            if not isinstance(value, list):
+                return []
+            return [str(item).strip() for item in value if str(item).strip()]
+
+        fallback = cls._default_intent_profile(query, clarification_qa)
+        # 原始目标和用户回答不允许被模型改写：它们是下游规划的事实锚点。
+        original_goal = query.strip()
+        explicit_requirements = fallback["explicit_requirements"]
+
+        return {
+            "original_goal": original_goal,
+            "explicit_requirements": explicit_requirements,
+            "assumptions": string_list(profile.get("assumptions")),
+            "unresolved_items": string_list(profile.get("unresolved_items")),
+        }
+
+    @staticmethod
+    def _render_intent_profile(profile: dict[str, Any]) -> str:
+        """为旧消费者保留简洁文本，同时显式区分事实、假设和未知项。"""
+        lines = [f"核心问题：{profile.get('original_goal', '')}"]
+        sections = (
+            ("用户明确要求", profile.get("explicit_requirements", [])),
+            ("默认假设（未经用户确认）", profile.get("assumptions", [])),
+            ("尚未明确", profile.get("unresolved_items", [])),
+        )
+        for label, items in sections:
+            if items:
+                lines.append(f"{label}：" + "；".join(str(item) for item in items))
+        return "\n".join(lines)
 
     def _should_stop_clarifying(self, clarification_qa: list[dict]) -> bool:
         """

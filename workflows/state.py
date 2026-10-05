@@ -85,6 +85,10 @@ class ResearchState(BaseModel):
 
     # ==================== Clarifier 输出 ====================
     clarified_intent: str = Field(default="", description="结构化意图描述")
+    intent_profile: dict = Field(
+        default_factory=dict,
+        description="区分用户明确要求、系统假设和未决项的结构化意图档案",
+    )
     clarification_qa: list[dict] = Field(
         default_factory=list, description="澄清问答对，每项包含 question/answer"
     )
@@ -110,6 +114,15 @@ class ResearchState(BaseModel):
         description="搜索关键词列表，每项包含 sub_question/keywords_zh/keywords_en",
     )
     research_plan: str = Field(default="", description="研究计划")
+    plan_coverage: list[dict] = Field(
+        default_factory=list, description="用户要求到子问题的覆盖映射"
+    )
+    plan_assumptions: list[str] = Field(
+        default_factory=list, description="研究规划采用的未确认默认假设"
+    )
+    planner_self_check: dict = Field(
+        default_factory=dict, description="Planner 对原始问题覆盖度的自检结果"
+    )
 
     # ==================== Orchestrator 输出 ====================
     orchestrator_plan: dict = Field(

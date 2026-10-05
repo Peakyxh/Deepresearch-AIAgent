@@ -63,6 +63,18 @@ export interface SubQuestion {
 
 export interface ResearchState {
   research_plan?: string;
+  plan_coverage?: Array<{
+    requirement_id?: string;
+    user_requirement?: string;
+    covered_by?: string[];
+    explanation?: string;
+  }>;
+  plan_assumptions?: string[];
+  planner_self_check?: {
+    fully_answers_original_query?: boolean;
+    uncovered_requirements?: string[];
+    invalid_sub_question_references?: string[];
+  };
   structured_sub_questions?: SubQuestion[];
   sub_question_results?: Array<{
     sub_question_id?: string;

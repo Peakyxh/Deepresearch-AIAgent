@@ -345,6 +345,11 @@ class RunManager:
                 record.state["structured_sub_questions"] = data.get(
                     "sub_questions", []
                 )
+                record.state["plan_coverage"] = data.get("plan_coverage", [])
+                record.state["plan_assumptions"] = data.get("plan_assumptions", [])
+                record.state["planner_self_check"] = data.get(
+                    "planner_self_check", {}
+                )
             elif phase == "research":
                 record.state["sub_question_results"] = data.get(
                     "sub_question_results", []

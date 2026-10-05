@@ -336,6 +336,9 @@ class ResearchWorkflow:
                 for sq in state.get("structured_sub_questions", [])
             ],
             research_plan=state.get("research_plan", ""),
+            plan_coverage=state.get("plan_coverage", []),
+            plan_assumptions=state.get("plan_assumptions", []),
+            planner_self_check=state.get("planner_self_check", {}),
         )
         return state
 
@@ -565,6 +568,7 @@ class ResearchWorkflow:
             "query": query,
             "session_id": session_id,
             "clarified_intent": "",
+            "intent_profile": {},
             "clarification_qa": [],
             "clarification_round": 0,
             "pending_clarification_questions": [],
@@ -573,6 +577,9 @@ class ResearchWorkflow:
             "structured_sub_questions": [],
             "search_keywords": [],
             "research_plan": "",
+            "plan_coverage": [],
+            "plan_assumptions": [],
+            "planner_self_check": {},
             "orchestrator_plan": {},
             "sub_question_results": [],
             "search_results": [],
