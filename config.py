@@ -137,6 +137,16 @@ class Settings(BaseSettings):
     max_sources_per_domain: int = 2
     evidence_excerpt_chars: int = 600
 
+    # ResearcherSubAgent 自主工具循环。顶层工作流仍由代码确定，只有单个
+    # 子问题内部允许 LLM 在受控预算内选择网页搜索、学术搜索或结束研究。
+    researcher_autonomous_tools_enabled: bool = True
+    researcher_tool_max_rounds: int = 6
+    researcher_tool_min_calls: int = 2
+    researcher_tool_max_web_calls: int = 3
+    researcher_tool_max_paper_calls: int = 3
+    researcher_tool_max_stagnant_rounds: int = 2
+    researcher_tool_decision_max_tokens: int = 600
+
     # 论文年份过滤：只保留此年份之后的论文（0 表示不过滤）
     paper_min_year: int = 0
 

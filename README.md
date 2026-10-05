@@ -516,45 +516,54 @@ VLLM_MODEL=meta-llama/Llama-3-8B
 
 ---
 
-## 高级配置
+## 内部策略配置
+
+研究流程、Critic 路由、上下文、Token 和证据预算统一在 `config.py` 的
+`Settings` 中维护，不放入 `.env.example`。`.env` 主要用于 API 密钥、模型与
+provider 选择，以及数据库、Redis 等部署连接信息。
 
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
-| `SESSION_ID` | 自动生成UUID | 会话ID，留空自动生成，设固定值可复用历史 |
-| `CLARIFIER_ENABLED` | true | 是否启用意图澄清（关闭后问题直接传入 Planner） |
-| `CLARIFIER_MAX_ROUNDS` | 2 | Clarifier 最大交互轮数 |
-| `ORCHESTRATOR_ENABLED` | true | 是否启用 Orchestrator 调度（关闭后回退串行 Researcher） |
-| `ORCHESTRATOR_MAX_CONCURRENT` | 3 | 最大并行子 Agent 数量 |
-| `ORCHESTRATOR_DYNAMIC_ADJUST` | true | 是否启用动态调整（根据中间结果追加子问题） |
-| `ORCHESTRATOR_DYNAMIC_ADJUST_MAX_ROUNDS` | 1 | 完成原计划后最多进行一次动态扩题判断 |
-| `ORCHESTRATOR_DYNAMIC_ADJUST_MAX_NEW_PER_ROUND` | 1 | 每次动态调整最多追加子问题数 |
-| `ORCHESTRATOR_DYNAMIC_ADJUST_MAX_TOTAL_APPENDS` | 1 | 动态调整总共最多追加子问题数 |
-| `SUB_QUESTION_OVERLAP_THRESHOLD` | 0.5 | 子问题重叠判定阈值（Jaccard 相似度，0 禁用去重） |
-| `SEARCH_CONTENT_MIN_LENGTH` | 50 | 网页结果最小内容长度，低于此值过滤 |
-| `SEARCH_CONTENT_MAX_LENGTH` | 2000 | 单条网页进入候选池的最大内容长度 |
-| `MAX_WEB_SOURCES_PER_SUB_QUESTION` | 8 | 每个子问题进入 LLM 的网页证据上限 |
-| `MAX_PAPER_SOURCES_PER_SUB_QUESTION` | 4 | 每个子问题进入 LLM 的论文证据上限 |
-| `MAX_SOURCES_PER_DOMAIN` | 2 | 每个子问题同一域名的最大网页数 |
-| `EVIDENCE_EXCERPT_CHARS` | 600 | 下游复用的单张证据卡片摘录长度 |
-| `PAPER_MIN_YEAR` | 2020 | 论文年份过滤，0表示不过滤 |
-| `PAPER_SORT_BY_CITATION` | true | 论文按引用次数降序排列 |
-| `CRITIQUE_PASS_THRESHOLD` | 70 | 审查通过阈值（满分100） |
-| `CRITIQUE_CONDITIONAL_THRESHOLD` | 50 | 审查有条件通过阈值 |
-| `SUB_QUESTION_CRITIQUE_PASS_THRESHOLD` | 60 | 逐子问题评审通过阈值 |
-| `OVERALL_COHERENCE_PASS_THRESHOLD` | 80 | 整体一致性直接通过阈值，非阻断问题交给 Writer |
-| `OVERALL_COHERENCE_CONDITIONAL_THRESHOLD` | 70 | 有条件通过阈值，仅阻断问题触发补研 |
-| `CRITIQUE_MAX_RETRIES` | 1 | Critic 最多触发的补充研究轮数 |
-| `WRITER_INTERACTIVE` | true | 是否启用两轮交互式写作 |
-| `WRITER_MAX_TOKENS` | 12000 | Writer 报告最大输出 token 数 |
-| `WRITER_OUTLINE_MAX_TOKENS` | 2000 | Writer 大纲最大输出 token 数 |
-| `RESEARCHER_MAX_TOKENS` | 5000 | 单个 Researcher 最大输出 token 数 |
-| `CRITIC_MAX_TOKENS` | 2500 | 单次 Critic 最大输出 token 数 |
-| `CONTEXT_MAX_TOKENS` | 0 | 上下文最大 token 数（0 根据模型自动计算） |
-| `CONTEXT_WINDOW_USAGE_RATIO` | 0.25 | 上下文占模型窗口比例 |
-| `CONTEXT_WARNING_RATIO` | 0.6 | 轻量压缩触发比例 |
-| `CONTEXT_DIALOG_COMPRESS_RATIO` | 0.8 | 深度压缩触发比例 |
-| `LLM_MAX_TOKENS` | 8192 | 未单独配置 Agent 时的默认最大输出 token |
-| `LLM_TEMPERATURE` | 0.3 | LLM 温度参数 |
+| `clarifier_enabled` | true | 是否启用意图澄清（关闭后问题直接传入 Planner） |
+| `clarifier_max_rounds` | 1 | Clarifier 最大交互轮数 |
+| `orchestrator_enabled` | true | 是否启用 Orchestrator 调度（关闭后回退串行 Researcher） |
+| `orchestrator_max_concurrent` | 3 | 最大并行子 Agent 数量 |
+| `orchestrator_dynamic_adjust` | true | 是否启用动态调整（根据中间结果追加子问题） |
+| `orchestrator_dynamic_adjust_max_rounds` | 1 | 完成原计划后最多进行一次动态扩题判断 |
+| `orchestrator_dynamic_adjust_max_new_per_round` | 1 | 每次动态调整最多追加子问题数 |
+| `orchestrator_dynamic_adjust_max_total_appends` | 1 | 动态调整总共最多追加子问题数 |
+| `sub_question_overlap_threshold` | 0.6 | 子问题重叠判定阈值（Jaccard 相似度，0 禁用去重） |
+| `search_content_min_length` | 50 | 网页结果最小内容长度，低于此值过滤 |
+| `search_content_max_length` | 2000 | 单条网页进入候选池的最大内容长度 |
+| `max_web_sources_per_sub_question` | 8 | 每个子问题进入 LLM 的网页证据上限 |
+| `max_paper_sources_per_sub_question` | 4 | 每个子问题进入 LLM 的论文证据上限 |
+| `max_sources_per_domain` | 2 | 每个子问题同一域名的最大网页数 |
+| `evidence_excerpt_chars` | 600 | 下游复用的单张证据卡片摘录长度 |
+| `researcher_autonomous_tools_enabled` | true | 是否启用子问题内的自主工具选择 |
+| `researcher_tool_max_rounds` | 6 | 单个子问题最多决策轮数 |
+| `researcher_tool_min_calls` | 2 | 允许主动结束前的最少工具调用数 |
+| `researcher_tool_max_web_calls` | 4 | 单个子问题网页搜索调用上限 |
+| `researcher_tool_max_paper_calls` | 3 | 单个子问题论文搜索调用上限 |
+| `researcher_tool_max_stagnant_rounds` | 2 | 连续无新增证据时的停止阈值 |
+| `paper_min_year` | 0 | 论文年份过滤，0 表示不过滤 |
+| `paper_sort_by_citation` | true | 论文按引用次数降序排列 |
+| `critique_pass_threshold` | 70 | 审查通过阈值（满分100） |
+| `critique_conditional_threshold` | 50 | 审查有条件通过阈值 |
+| `sub_question_critique_pass_threshold` | 60 | 逐子问题评审通过阈值 |
+| `overall_coherence_pass_threshold` | 80 | 整体一致性直接通过阈值，非阻断问题交给 Writer |
+| `overall_coherence_conditional_threshold` | 70 | 有条件通过阈值，仅阻断问题触发补研 |
+| `critique_max_retries` | 1 | Critic 最多触发的补充研究轮数 |
+| `writer_interactive` | true | 是否启用两轮交互式写作 |
+| `writer_max_tokens` | 12000 | Writer 报告最大输出 token 数 |
+| `writer_outline_max_tokens` | 2000 | Writer 大纲最大输出 token 数 |
+| `researcher_max_tokens` | 5000 | 单个 Researcher 最大输出 token 数 |
+| `critic_max_tokens` | 2500 | 单次 Critic 最大输出 token 数 |
+| `context_max_tokens` | 0 | 上下文最大 token 数（0 根据模型自动计算） |
+| `context_window_usage_ratio` | 0.5 | 上下文占模型窗口比例 |
+| `context_warning_ratio` | 0.6 | 轻量压缩触发比例 |
+| `context_dialog_compress_ratio` | 0.8 | 深度压缩触发比例 |
+| `llm_max_tokens` | 8192 | 未单独配置 Agent 时的默认最大输出 token |
+| `llm_temperature` | 0.3 | LLM 温度参数 |
 
 ---
 
